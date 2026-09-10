@@ -54,8 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m arcusbot", description="Arcus testnet trading bot")
     p.add_argument("command",
                    choices=["run", "preflight", "markets", "quote", "report",
-                            "selftest", "sweep", "history"])
+                            "selftest", "sweep", "history", "wallets"])
     p.add_argument("--venue", choices=["arcus", "sim"], help="arcus (real API) or sim (offline)")
+    p.add_argument("--wallet", metavar="NAME",
+                   help="use a named wallet profile from .env "
+                        "(e.g. t1 -> ARCUS_ADDRESS_T1/ARCUS_API_SECRET_T1)")
     p.add_argument("--network", choices=["testnet", "mainnet"],
                    help="testnet (default) or mainnet (requires the mainnet gate; see docs)")
     p.add_argument("--mode", choices=["dry-run", "live"], help="dry-run signs nothing, live sends orders")
@@ -140,7 +143,32 @@ def config_from_args(args: argparse.Namespace) -> Config:
                       f"using {limit} (the CLI may only tighten risk limits)")
                 overrides[key] = limit
 
-    return Config.from_env(**overrides)
+    cfg = Config.from_env(**overrides)
+
+    # A named wallet profile overrides identity, but never the risk settings —
+    # and an explicit --network on the command line still wins, so that
+    # "--wallet m1 --network testnet" cannot silently trade mainnet.
+    if getattr(args, "wallet", None):
+        from .wallets import apply_to_config, load_profile
+        profile = load_profile(args.wallet)
+        if not profile.usable:
+            raise SystemExit(
+                f"wallet profile {args.wallet!r} is unusable:\n  - "
+                + "\n  - ".join(profile.problems)
+                + "\n\nList what is defined with:  python -m arcusbot wallets")
+        changes = apply_to_config(cfg, profile)
+        if args.network:
+            cfg.network = args.network
+            from .config import MAINNET_REST, MAINNET_WS, TESTNET_REST, TESTNET_WS
+            cfg.rest_url = MAINNET_REST if args.network == "mainnet" else TESTNET_REST
+            cfg.ws_url = MAINNET_WS if args.network == "mainnet" else TESTNET_WS
+        print(f"wallet: {profile.describe()}"
+              + (f"  ({', '.join(changes)})" if changes else ""))
+        if profile.has_private_key:
+            print("  warning: this profile holds a wallet private key. The bot "
+                  "does not need one to trade.")
+
+    return cfg
 
 
 # --------------------------------------------------------------------------- #
@@ -535,6 +563,14 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.command == "preflight":
         return cmd_preflight(cfg, args.json)
+    if args.command == "wallets":
+        from .wallets import format_table, load_all
+        profiles = load_all()
+        if args.json:
+            print(json.dumps([p.as_dict() for p in profiles], indent=2))
+        else:
+            print(format_table(profiles))
+        return 0
     if args.command == "markets":
         return cmd_markets(cfg, args.json, rank=args.rank)
     if args.command == "history":

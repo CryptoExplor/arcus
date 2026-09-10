@@ -87,7 +87,61 @@ environment variables always override the file — `BOT_SPREAD_BPS=12 python -m
 arcusbot run` works as expected.
 
 New to Arcus? Signing up through <https://testnet.arcus.xyz/ref/ARCUS>
-(mainnet: <https://app.arcus.xyz/ref/AIAGENT>) credits this tool.
+(mainnet: <https://app.arcus.xyz/ref/IN>) credits this tool.
+
+### Several wallets in one file
+
+Two testnet wallets and a mainnet one? Define named profiles and switch with
+`--wallet`. The suffix is the profile name, upper-cased:
+
+```bash
+ARCUS_ADDRESS_T1=0x...       ARCUS_API_SECRET_T1=<64 hex>
+ARCUS_ADDRESS_T2=0x...       ARCUS_API_SECRET_T2=<64 hex>
+ARCUS_ADDRESS_M1=0x...       ARCUS_API_SECRET_M1=<64 hex>
+ARCUS_NETWORK_M1=mainnet
+```
+
+```bash
+python -m arcusbot wallets                       # list them (secrets redacted)
+python -m arcusbot preflight --wallet t1
+python -m arcusbot run --wallet t2 --mode live --duration 900
+```
+
+The network follows the name (`t*` → testnet, `m*` → mainnet) unless you set
+`ARCUS_NETWORK_<NAME>`, and selecting a profile also switches the REST/WS hosts
+so a mainnet profile cannot keep talking to the testnet gateway. An explicit
+`--network` on the command line still wins, so `--wallet m1 --network testnet`
+is safe.
+
+**Selecting a mainnet wallet does not bypass the mainnet gate** (section 8).
+You still need all five opt-ins; the profile only supplies the identity.
+
+### Wallet private keys — the dangerous kind
+
+`ARCUS_PRIVATE_KEY_<NAME>` is supported but **the bot never needs it to trade**.
+Keep the distinction clear:
+
+| Credential | Can trade | Can withdraw your funds |
+| --- | --- | --- |
+| `ARCUS_API_SECRET_*` (Ed25519 signing key) | yes | **no** |
+| `ARCUS_PRIVATE_KEY_*` (wallet key) | yes | **YES** |
+
+Only `tools/onboard.py` (registering a new API key) and spot RFQ signing need a
+wallet key. The safest arrangement is to store none and pass it once:
+
+```bash
+python tools/onboard.py --private-key 0x...
+```
+
+If you do store them, three protections apply:
+
+1. They are **never read** during ordinary trading — only when a tool asks.
+2. A **mainnet** key additionally requires `ARCUS_ALLOW_MAINNET_PRIVATE_KEY=true`.
+3. They are redacted from `wallets`, `--json`, logs and status output, and
+   `wallets` prints a warning whenever one is present.
+
+`.env` is gitignored, but a gitignore is not encryption: anything with read
+access to the file has your funds.
 
 ### Credentials
 
@@ -206,7 +260,7 @@ python -m arcusbot preflight --capital-pct 30 --reserve 150   # preview the plan
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `ARCUS_REFERRAL_TESTNET` | `ARCUS` | code for `testnet.arcus.xyz/ref/<code>` |
-| `ARCUS_REFERRAL_MAINNET` | `AIAGENT` | code for `app.arcus.xyz/ref/<code>` |
+| `ARCUS_REFERRAL_MAINNET` | `IN` | code for `app.arcus.xyz/ref/<code>` |
 | `BOT_SHOW_REFERRAL` | `true` | `false` hides the banner everywhere |
 
 Referral attribution happens at **signup**, in a browser — it never touches an

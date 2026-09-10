@@ -31,7 +31,7 @@ from .scaling import dec_str
 
 # Default attribution for this tool. Override in .env to use your own.
 DEFAULT_REFERRAL_TESTNET = "ARCUS"
-DEFAULT_REFERRAL_MAINNET = "AIAGENT"
+DEFAULT_REFERRAL_MAINNET = "IN"
 
 TESTNET_REF_BASE = "https://testnet.arcus.xyz/ref/"
 MAINNET_REF_BASE = "https://app.arcus.xyz/ref/"

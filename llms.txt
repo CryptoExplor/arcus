@@ -30,6 +30,7 @@ before changing X".
 | which markets are traded | `arcusbot/selection.py` |
 | how the bot reacts to conditions | `arcusbot/adaptive.py` |
 | restart behaviour | `arcusbot/session.py`, `docs/PERSISTENCE.md` |
+| credentials / multiple wallets | `arcusbot/wallets.py`, `docs/BOT_OPERATIONS.md` (credentials) |
 
 Then run `python -m pytest tests -q` (256 tests, no network, <1s). If you cannot
 explain which test would have caught your bug, you have not finished.
@@ -103,6 +104,7 @@ at <https://testnet.arcus.xyz/api-keys>, or scripted via `tools/onboard.py`.
 | `preflight` | read-only | no | Gateway, key registration, markets, fees, balance, sizing |
 | `markets` | read-only | no | Tick/step/notional grid per market |
 | `markets --rank` | read-only | no | Score/veto markets for the capital you have |
+| `wallets` | no | no | List named wallet profiles from `.env` (secrets redacted) |
 | `quote` | read-only | no | Print the exact intents the strategy would emit now |
 | `run --mode dry-run` | read-only | no | Full loop, logs intents instead of signing |
 | `run --mode live` | yes | **yes** | Real signed orders |
@@ -260,6 +262,7 @@ cli.py         argument parsing, logging, command dispatch
 config.py      typed config from env/.env + validate()  <- consults the mainnet gate
 mainnet.py     fail-closed mainnet gate: conjunctive opt-in + hard capital cap
 selection.py   market ranking/veto: which markets this account can actually trade
+wallets.py     named wallet profiles (--wallet t1) + wallet-private-key guards
 adaptive.py    per-market feedback control (edge + frequency multipliers)
 capital.py     budget -> clip/position/loss limits, reserves, mid-run re-sizing
 referral.py    referral links + $1B VIP milestone arithmetic
@@ -352,7 +355,7 @@ Full detail: `docs/CAPITAL.md`. Tests: `tests/test_capital.py`.
 
 `referral.py` holds signup links (`ARCUS_REFERRAL_TESTNET` default `ARCUS` →
 `https://testnet.arcus.xyz/ref/ARCUS`; `ARCUS_REFERRAL_MAINNET` default
-`AIAGENT` → `https://app.arcus.xyz/ref/AIAGENT`). **Referral attribution is a
+`IN` → `https://app.arcus.xyz/ref/IN`). **Referral attribution is a
 signup-time browser concern — never inject a code into an order payload.** The
 banner is suppressed by `BOT_SHOW_REFERRAL=false`.
 
@@ -432,7 +435,11 @@ Shutdown is always `cancel-all -> flatten (reduce-only IOC, retried) -> report`.
    and enforced as the free-collateral floor.
 10. **Referral codes never enter an order payload.** Signup-time only.
 11. **`.env` is gitignored and never committed**; `.env.example` carries the
-    same keys with no secrets.
+    same keys with no secrets. **Secrets are redacted from every output** —
+    `WalletProfile.as_dict`/`describe` emit `<redacted>`, never key material.
+    A wallet private key is never loaded unless a caller passes
+    `require_private_key=True`, and a mainnet one additionally requires
+    `ARCUS_ALLOW_MAINNET_PRIVATE_KEY=true`.
 12. **Risk state survives restarts.** Daily loss and drawdown carry over; a
     restart must never hand back a spent loss budget.
 13. **The required edge never falls below `BOT_MIN_EDGE_BPS`**, even at rebate

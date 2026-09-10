@@ -113,6 +113,34 @@ small for one $5 clip refuses to start with an actionable message rather than
 failing on every order. Leave the capital knobs at `0` to size by hand instead.
 Details in [`docs/CAPITAL.md`](docs/CAPITAL.md).
 
+## Multiple wallets
+
+Define named profiles in `.env` and switch with `--wallet`:
+
+```bash
+ARCUS_ADDRESS_T1=0x...  ARCUS_API_SECRET_T1=<64 hex>   # testnet wallet 1
+ARCUS_ADDRESS_T2=0x...  ARCUS_API_SECRET_T2=<64 hex>   # testnet wallet 2
+ARCUS_ADDRESS_M1=0x...  ARCUS_API_SECRET_M1=<64 hex>   # mainnet
+ARCUS_NETWORK_M1=mainnet
+```
+
+```bash
+python -m arcusbot wallets                    # list them, secrets redacted
+python -m arcusbot run --wallet t1 --mode live
+```
+
+The network follows the profile name (`t*` testnet, `m*` mainnet) and switches
+the API hosts with it. Selecting a mainnet wallet still does **not** bypass the
+mainnet gate.
+
+> **Wallet private keys** (`ARCUS_PRIVATE_KEY_*`) are optional and **not needed
+> to trade**. The API signing key authorises trading only; a wallet key can
+> withdraw your funds. If stored, it is never loaded during trading, a mainnet
+> one needs `ARCUS_ALLOW_MAINNET_PRIVATE_KEY=true`, and it is redacted from all
+> output. Prefer passing it once to `tools/onboard.py --private-key`.
+
+---
+
 ## Commands
 
 | Command | Network | Sends orders | Purpose |
@@ -220,7 +248,7 @@ edge right first, then scale clip size — quoting faster mostly burns rate limi
 Signing up through these links credits this tool:
 
 - testnet — <https://testnet.arcus.xyz/ref/ARCUS>
-- mainnet — <https://app.arcus.xyz/ref/AIAGENT>
+- mainnet — <https://app.arcus.xyz/ref/IN>
 
 Attribution happens at **signup**, in a browser; it never touches an order or
 affects execution. Forking? Put your own codes in `ARCUS_REFERRAL_TESTNET` /

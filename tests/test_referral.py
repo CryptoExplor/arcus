@@ -26,7 +26,7 @@ def test_default_links_match_the_published_ones() -> None:
     testnet = Config(network="testnet")
     mainnet = Config(network="mainnet")
     assert referral_link(testnet) == "https://testnet.arcus.xyz/ref/ARCUS"
-    assert referral_link(mainnet) == "https://app.arcus.xyz/ref/AIAGENT"
+    assert referral_link(mainnet) == "https://app.arcus.xyz/ref/IN"
 
 
 def test_link_follows_the_configured_network() -> None:
@@ -55,7 +55,7 @@ def test_all_links_lists_both_networks() -> None:
 def test_banner_mentions_both_networks_and_the_opt_out() -> None:
     text = banner(Config())
     assert "testnet.arcus.xyz/ref/ARCUS" in text
-    assert "app.arcus.xyz/ref/AIAGENT" in text
+    assert "app.arcus.xyz/ref/IN" in text
     assert "BOT_SHOW_REFERRAL=false" in text
 
 
