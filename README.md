@@ -23,6 +23,11 @@ Python 3.11+, stdlib-only except `cryptography` and `websockets`.
 > Mainnet is **not** ready. See [`docs/EVIDENCE_REPORT.md`](docs/EVIDENCE_REPORT.md)
 > for the full findings and [`docs/VALIDATION.md`](docs/VALIDATION.md) for the
 > protocol that must be run first.
+>
+> **Running this on a machine with network access?** Start with
+> [`docs/LOCAL_AGENT_HANDOFF.md`](docs/LOCAL_AGENT_HANDOFF.md) — and note that
+> `.env.example` ships `ARCUS_VENUE=sim`, so `--mode live` alone does **not**
+> reach Arcus.
 
 ## New here? Start with this
 

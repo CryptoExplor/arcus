@@ -138,7 +138,7 @@ unrealized-dependence trap, refusal to rule on small samples, rejection of a
 noisy positive mean, fee-coverage failure, each operational blocker, JSONL round
 trips including corrupt-line tolerance, and the `makerShare` regression.
 
-Full suite: **324 tests passing.**
+Full suite: **330 tests passing.**
 
 ---
 
@@ -164,6 +164,44 @@ I did not tune the simulator to change these numbers.
 
 These files are named to prevent later confusion:
 `state/evidence-simulator-not-testnet.jsonl`.
+
+---
+
+## 4b. A trap found while preparing the handoff
+
+While validating the exact commands a local agent would run, I found a defect
+that would have quietly invalidated the entire validation phase.
+
+`.env.example` ships **`ARCUS_VENUE=sim`**. The natural command —
+`run --network testnet --mode live --duration 900` — therefore runs the
+**offline simulator** while logging `mode=live`, producing fills, PnL, and a
+report that all look real. Verified directly:
+
+```
+engine ready: venue=sim mode=live strategy=volume-maker markets=BTC-USD,ETH-USD
+FILL BTC-USD BUY 0.00039 @ 63964.9 (MAKER, fee 0.0037)
+```
+
+`network=testnet` and `mode=live` were both honoured; no packet reached Arcus.
+Worse, the evidence harness *recorded* `venue` but never *acted* on it, so
+simulated sessions could have accumulated into a `POSITIVE-EDGE` verdict and
+unlocked the mainnet recommendation on entirely synthetic data.
+
+Three fixes:
+
+1. `SessionEvidence.is_live_execution` — true only for `venue=arcus` **and**
+   `mode=live`. Simulated sessions self-report a warning.
+2. `Aggregate.blockers()` lists simulated sessions **first**, and
+   `credible_positive_edge()` returns False if *any* session is simulated. A
+   test asserts that eight flawless sim sessions still yield
+   `ready_for_mainnet() == False`, and that one sim session contaminates an
+   otherwise-passing live set.
+3. The engine prints a loud banner on `venue=sim`, and `.env.example` warns in
+   place.
+
+This is the kind of error that produces confident, entirely fictional evidence,
+so it is worth stating plainly: **before this fix, the validation phase could
+have "succeeded" without ever contacting Arcus.**
 
 ---
 
@@ -230,11 +268,13 @@ On a machine with network access:
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' https://api.testnet.arcus.xyz/health   # need 200
-python -m arcusbot preflight --wallet t1
-python -m arcusbot run --wallet t1 --mode live --markets BTC-USD \
-       --duration 1800 --regime low-vol
+grep '^ARCUS_VENUE' .env      # MUST be `arcus`, not the shipped `sim`
+python -m arcusbot preflight --wallet t1 --venue arcus
+python -m arcusbot run --venue arcus --wallet t1 --mode live \
+       --markets BTC-USD --duration 1800 --regime low-vol
 python -m arcusbot evidence          # exit 0 only if the data supports proceeding
 ```
 
+Full operator instructions: `docs/LOCAL_AGENT_HANDOFF.md`.
 Then work the A–K matrix in `docs/VALIDATION.md` §5 and re-read the verdict.
 **Stop here until that data exists.**

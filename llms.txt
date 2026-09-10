@@ -31,6 +31,7 @@ before changing X".
 | how the bot reacts to conditions | `arcusbot/adaptive.py` |
 | restart behaviour | `arcusbot/session.py`, `docs/PERSISTENCE.md` |
 | claiming the strategy works | `arcusbot/evidence.py`, `docs/VALIDATION.md` — read BEFORE reporting any result |
+| running real testnet sessions | `docs/LOCAL_AGENT_HANDOFF.md` — `ARCUS_VENUE=sim` is the default and does NOT hit Arcus |
 | credentials / multiple wallets | `arcusbot/wallets.py`, `docs/BOT_OPERATIONS.md` (credentials) |
 
 Then run `python -m pytest tests -q` (256 tests, no network, <1s). If you cannot
@@ -464,9 +465,14 @@ Shutdown is always `cancel-all -> flatten (reduce-only IOC, retried) -> report`.
     `realized + unrealized + funding + rebates - fees > 0` AND the
     realized-only figure is also positive. `evidence.py` flags the difference
     as `unrealizedDependent`; never report such a session as a win.
-17. **No edge claim below 5 sessions / 400 fills / t >= 2.0.** Enforced by
+17. **Simulator sessions are never evidence.** `venue=sim` or `mode=dry-run`
+    sets `isLiveExecution: false`; `Aggregate` lists them as a blocker and
+    `credible_positive_edge` returns False no matter how good the numbers are.
+    `--mode live` with `ARCUS_VENUE=sim` runs the simulator while logging
+    "live" — this is the easiest way to fake a result by accident.
+18. **No edge claim below 5 sessions / 400 fills / t >= 2.0.** Enforced by
     `Aggregate.credible_positive_edge`. Tests: `test_evidence.py`.
-18. **Shutdown confirms rather than assumes.** After cancel + flatten the engine
+19. **Shutdown confirms rather than assumes.** After cancel + flatten the engine
     re-reads account state and reports any residual position instead of exiting
     quietly. (`engine._confirm_flat`)
 

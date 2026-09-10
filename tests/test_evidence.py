@@ -245,3 +245,75 @@ def test_maker_fills_can_never_exceed_total_fills() -> None:
         "pnl": {"fillCount": 10, "makerShare": "100", "volumeUsd": "100"},
     })
     assert ev.maker_fills == 10 and ev.taker_fills == 0
+
+
+# ------------------------------- simulator output is not evidence ----------
+#
+# The failure this guards against: `.env.example` ships ARCUS_VENUE=sim, so
+# `arcusbot run --network testnet --mode live` runs the OFFLINE SIMULATOR while
+# logging "mode=live" and "network=testnet". The output is evidence-shaped and
+# completely synthetic. Nothing that gates real money may count it.
+
+
+def test_sim_venue_session_is_not_live_execution() -> None:
+    assert session(venue="sim").is_live_execution is False
+    assert session(venue="arcus", mode="dry-run").is_live_execution is False
+    assert session(venue="arcus", mode="live").is_live_execution is True
+
+
+def test_simulated_session_warns_loudly() -> None:
+    warnings = " ".join(session(venue="sim").warnings()).lower()
+    assert "simulated" in warnings
+    assert "not evidence" in warnings
+
+
+def test_perfect_simulator_results_never_reach_positive_edge() -> None:
+    """Even flawless sim numbers must not unlock mainnet."""
+    sessions = [
+        session(session_id=f"sim{i}", venue="sim", regime=f"r{i}",
+                fills=500, volume_usd=Decimal("100000"),
+                gross_pnl=Decimal("100"), fees_paid=Decimal("10"),
+                realized_pnl=Decimal("100"))
+        for i in range(8)
+    ]
+    agg = aggregate(sessions)
+    assert agg.total_net > 0                      # the numbers look great
+    assert agg.credible_positive_edge() is False  # and are still refused
+    assert agg.ready_for_mainnet() is False
+    assert any("simulated" in b.lower() for b in agg.blockers())
+
+
+def test_dry_run_against_real_venue_also_refused() -> None:
+    sessions = [
+        session(session_id=f"d{i}", venue="arcus", mode="dry-run",
+                fills=500, volume_usd=Decimal("100000"),
+                gross_pnl=Decimal("100"), fees_paid=Decimal("10"),
+                realized_pnl=Decimal("100"))
+        for i in range(8)
+    ]
+    assert aggregate(sessions).ready_for_mainnet() is False
+
+
+def test_one_simulated_session_contaminates_an_otherwise_good_set() -> None:
+    """A single sim session poisons the aggregate rather than being averaged in."""
+    good = [
+        session(session_id=f"live{i}", regime=f"r{i}", fills=500,
+                volume_usd=Decimal("100000"), gross_pnl=Decimal("60"),
+                fees_paid=Decimal("10"), realized_pnl=Decimal("60"))
+        for i in range(6)
+    ]
+    assert aggregate(good).ready_for_mainnet() is True
+    contaminated = good + [session(session_id="oops", venue="sim", fills=500,
+                                   volume_usd=Decimal("100000"),
+                                   gross_pnl=Decimal("60"),
+                                   fees_paid=Decimal("10"),
+                                   realized_pnl=Decimal("60"))]
+    assert aggregate(contaminated).ready_for_mainnet() is False
+
+
+def test_live_execution_flag_survives_a_jsonl_round_trip(tmp_path) -> None:
+    path = tmp_path / "ev.jsonl"
+    append_session(path, session(session_id="a", venue="sim"))
+    append_session(path, session(session_id="b", venue="arcus", mode="live"))
+    loaded = load_sessions(path)
+    assert [s.is_live_execution for s in loaded] == [False, True]

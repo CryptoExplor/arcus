@@ -49,6 +49,12 @@ TCP connects, then the connection is closed on ClientHello. `github.com`
 resolves and serves fine, so this is an egress allowlist, not a broken TLS
 stack. **Validation must be run from a machine with real network access.**
 
+Running elsewhere? See [`LOCAL_AGENT_HANDOFF.md`](LOCAL_AGENT_HANDOFF.md).
+
+**Set `ARCUS_VENUE=arcus` first.** `.env.example` ships `sim`, and with `sim`
+the bot never contacts Arcus even under `--mode live --network testnet`. The
+`evidence` command refuses to count such sessions, but check the setting anyway.
+
 Verify before starting:
 
 ```bash

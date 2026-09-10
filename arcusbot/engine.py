@@ -212,6 +212,17 @@ class Engine:
         })
         self.session.save()
 
+        if self.cfg.venue == "sim":
+            # Loud, because "--mode live" with ARCUS_VENUE=sim reads as a real
+            # session in the logs and produces evidence-shaped output that is
+            # entirely synthetic. See docs/VALIDATION.md.
+            log.warning("=" * 68)
+            log.warning("SIMULATED SESSION — venue=sim. No orders reach Arcus.")
+            log.warning("Results are NOT evidence of trading performance.")
+            log.warning("For real testnet execution set ARCUS_VENUE=arcus "
+                        "(or pass --venue arcus).")
+            log.warning("=" * 68)
+
         log.info("engine ready: venue=%s mode=%s strategy=%s markets=%s",
                  self.cfg.venue, self.cfg.mode, self.cfg.strategy, ",".join(wanted))
 

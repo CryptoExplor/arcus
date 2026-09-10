@@ -50,6 +50,7 @@ class SessionEvidence:
     regime: str = ""
     network: str = "testnet"
     venue: str = "arcus"
+    mode: str = "live"
     markets: list[str] = field(default_factory=list)
     started_at: float = 0.0
     runtime_s: float = 0.0
@@ -154,8 +155,21 @@ class SessionEvidence:
         """
         return self.net_pnl > 0 >= self.realized_only_net
 
+    @property
+    def is_live_execution(self) -> bool:
+        """True only for real fills from the Arcus API.
+
+        Simulator sessions are useful for wiring and regression tests, but they
+        are NOT evidence about the market. Anything downstream that makes a
+        go/no-go decision must gate on this.
+        """
+        return self.venue == "arcus" and self.mode == "live"
+
     def warnings(self) -> list[str]:
         out: list[str] = []
+        if not self.is_live_execution:
+            out.append(f"SIMULATED session (venue={self.venue}, mode={self.mode}) — "
+                       f"not evidence of real trading performance")
         if self.fills < MIN_FILLS_FOR_VERDICT:
             out.append(f"only {self.fills} fills — below the {MIN_FILLS_FOR_VERDICT} "
                        f"needed for a per-session verdict")
@@ -186,6 +200,7 @@ class SessionEvidence:
             "rejectionRate": _q(self.rejection_rate, "0.001"),
             "realizedOnlyNet": _q(self.realized_only_net, "0.0001"),
             "unrealizedDependent": self.unrealized_dependent,
+            "isLiveExecution": self.is_live_execution,
             "profitable": self.profitable,
             "warnings": self.warnings(),
         })
@@ -230,6 +245,7 @@ class SessionEvidence:
             regime=regime,
             network=str(status.get("network") or "testnet"),
             venue=str(status.get("venue") or "arcus"),
+            mode=str(status.get("mode") or "live"),
             markets=markets,
             started_at=time.time() - float(pnl.get("runtimeSeconds") or 0),
             runtime_s=float(pnl.get("runtimeSeconds") or 0),
@@ -344,10 +360,12 @@ class Aggregate:
     def credible_positive_edge(self) -> bool:
         """A positive edge we would actually bet on.
 
-        Requires the sample to be large enough AND the mean to clear roughly
-        two standard errors. This is intentionally strict: the cost of a false
-        positive is real money.
+        Requires real Arcus execution, a large enough sample, AND a mean that
+        clears roughly two standard errors. Intentionally strict: the cost of a
+        false positive is real money.
         """
+        if not self.sessions or self.simulated_sessions:
+            return False
         if (self.total_fills < MIN_FILLS_FOR_EDGE_CLAIM
                 or len(self.sessions) < MIN_SESSIONS_FOR_EDGE_CLAIM):
             return False
@@ -356,9 +374,18 @@ class Aggregate:
                 and self.fee_coverage_ratio > 1
                 and self.t_statistic() >= 2.0)
 
+    @property
+    def simulated_sessions(self) -> list[SessionEvidence]:
+        return [s for s in self.sessions if not s.is_live_execution]
+
     def blockers(self) -> list[str]:
         """Everything standing between here and a mainnet experiment."""
         out: list[str] = []
+        sim = self.simulated_sessions
+        if sim:
+            out.append(f"{len(sim)} of {len(self.sessions)} session(s) are SIMULATED "
+                       f"(venue=sim or dry-run) — simulator output is not evidence; "
+                       f"re-run against the real Arcus API")
         if len(self.sessions) < MIN_SESSIONS_FOR_EDGE_CLAIM:
             out.append(f"only {len(self.sessions)} session(s); need "
                        f"{MIN_SESSIONS_FOR_EDGE_CLAIM}+ across different regimes")
