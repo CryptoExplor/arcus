@@ -30,12 +30,13 @@ from arcusbot.strategy import MarketWorker, OrderIntent  # noqa: E402
 
 
 def make_engine(tmp_path: Path, **overrides) -> Engine:
-    cfg = Config.from_env(
+    kwargs = dict(
         venue="arcus", mode="live", markets=["BTC-USD"],
         state_dir=tmp_path, persist_state=False,
         address="0x" + "ab" * 20, api_key="k", api_secret="ab" * 32,
-        **overrides,
     )
+    kwargs.update(overrides)
+    cfg = Config.from_env(**kwargs)
     eng = Engine(cfg)
     meta = dict(SIM_MARKETS["BTC-USD"])
     book = BookState(market="BTC-USD")
@@ -209,3 +210,78 @@ def _noop(*_args, **_kwargs):
     async def _inner():
         return None
     return _inner()
+
+
+# ----------------------------------------------------- kill-switch sequence --
+
+
+def test_shutdown_halts_before_cancelling(tmp_path: Path) -> None:
+    """New exposure must stop before we start unwinding, not after."""
+    eng = make_engine(tmp_path, venue="sim", mode="dry-run")
+    order: list[str] = []
+
+    async def cancel():
+        order.append("cancel")
+        assert eng.risk.halt_reason, "risk must already be halted when cancelling"
+
+    async def flatten():
+        order.append("flatten")
+
+    async def confirm():
+        order.append("confirm")
+
+    eng._cancel_everything = cancel      # type: ignore[assignment]
+    eng._flatten_everything = flatten    # type: ignore[assignment]
+    eng._confirm_flat = confirm          # type: ignore[assignment]
+    eng.cfg.print_summary = False
+    eng.exit_reason = "test shutdown"
+
+    asyncio.run(eng.shutdown())
+    assert order == ["cancel", "flatten", "confirm"]
+
+
+def test_shutdown_reports_a_position_it_could_not_close(tmp_path: Path) -> None:
+    """Silently exiting with inventory is the worst possible outcome."""
+    eng = make_engine(tmp_path, venue="sim", mode="dry-run")
+    eng.pnl.record_fill(Fill(trade_id="stuck-1", market="BTC-USD", side="BUY",
+                             price=Decimal("64000"), size=Decimal("0.01"),
+                             liquidity="MAKER", fee=Decimal("0"), ts=time.time()))
+    eng.sim = None
+
+    async def refresh():
+        return None
+
+    eng._refresh_positions = refresh  # type: ignore[assignment]
+    eng.cfg.venue = "arcus"
+    eng.cfg.mode = "live"
+    asyncio.run(eng._confirm_flat())
+    assert eng.residual_positions, "an unclosed position must be surfaced"
+    assert "BTC-USD" in eng.residual_positions
+
+
+def test_confirm_flat_records_when_the_venue_is_unreachable(tmp_path: Path) -> None:
+    eng = make_engine(tmp_path)
+
+    async def boom():
+        raise TimeoutError("no route")
+
+    eng._refresh_positions = boom  # type: ignore[assignment]
+    asyncio.run(eng._confirm_flat())
+    assert eng.final_state_confirmed is False
+
+
+def test_restart_does_not_reset_loss_protection(tmp_path: Path) -> None:
+    """Losses carried across a restart must still count toward the limit."""
+    from arcusbot.session import SessionStore
+
+    path = tmp_path / "session.json"
+    store = SessionStore(path, enabled=True).load()
+    store.day.realized_pnl_usd = Decimal("-30")
+    store.risk.peak_net_pnl_usd = Decimal("12")
+    store.save()
+
+    reloaded = SessionStore(path, enabled=True).load()
+    assert reloaded.carried_daily_loss() == Decimal("30"), \
+        "a restart must not wipe today's booked loss"
+    assert reloaded.risk.peak_net_pnl_usd == Decimal("12"), \
+        "the drawdown high-water mark must survive a restart"

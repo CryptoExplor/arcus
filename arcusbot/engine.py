@@ -86,6 +86,8 @@ class Engine:
         self.mainnet_cap: Decimal | None = None
         self.adaptive: dict[str, AdaptiveController] = {}
         self.last_fill_at = 0.0
+        self.final_state_confirmed = False
+        self.residual_positions: dict[str, str] = {}
 
     # ------------------------------------------------------------ bootstrap --
     def _load_markets(self) -> dict[str, dict[str, Any]]:
@@ -832,9 +834,14 @@ class Engine:
 
     async def shutdown(self) -> None:
         log.info("shutting down: %s", self.exit_reason)
+        # Ordered deliberately: stop opening (the risk halt below), pull
+        # resting orders, work the inventory flat, then verify against the
+        # exchange rather than assuming the previous two steps worked.
+        self.risk.halt(self.exit_reason)
         if self.cfg.cancel_all_on_exit:
             await self._cancel_everything()
             await self._flatten_everything()
+            await self._confirm_flat()
         if self.ws:
             await self.ws.stop()
 
@@ -860,11 +867,45 @@ class Engine:
             if self.session.enabled and self.session.lifetime.sessions > 1:
                 print(self.session.describe())
             print(f"exit reason : {self.exit_reason}")
+            if self.residual_positions:
+                print(f"OPEN POSITIONS REMAIN: {self.residual_positions} "
+                      f"— close these manually")
+            elif self.cfg.cancel_all_on_exit and not self.final_state_confirmed:
+                print("warning     : could not confirm final account state")
             print(f"report      : {report}")
             print("=" * 72)
             banner_text = banner(self.cfg)
             if banner_text:
                 print(banner_text)
+
+    async def _confirm_flat(self) -> None:
+        """Verify the final account state instead of trusting the flatten.
+
+        A reduce-only order can be rejected, partially filled, or simply not
+        reach the venue. The operator needs to know that in the report, so the
+        residual position is measured and stated rather than assumed to be
+        zero.
+        """
+        try:
+            if self.cfg.venue == "sim":
+                assert self.sim is not None
+                self._sync_positions(self.sim.account().get("positions"), authoritative=True)
+            elif self.cfg.live:
+                await self._refresh_positions()
+        except Exception as exc:
+            log.warning("could not confirm final account state: %s", exc)
+            self.final_state_confirmed = False
+            return
+
+        self.final_state_confirmed = True
+        residual = {name: w.position for name, w in self.workers.items() if w.position != 0}
+        if residual:
+            self.residual_positions = {k: dec_str(v) for k, v in residual.items()}
+            log.warning("SHUTDOWN WITH OPEN POSITION(S): %s — these remain at risk "
+                        "and must be closed manually",
+                        ", ".join(f"{k} {dec_str(v)}" for k, v in residual.items()))
+        else:
+            log.info("confirmed flat: no open positions remain")
 
     async def _cancel_everything(self) -> None:
         if self.cfg.venue == "sim":
@@ -992,6 +1033,8 @@ class Engine:
             "cancelsSent": self.cancels_sent,
             "rejects": self.rejects,
             "exitReason": self.exit_reason if self.stopping.is_set() else None,
+            "finalStateConfirmed": self.final_state_confirmed,
+            "residualPositions": self.residual_positions,
             "health": self.health(pnl_snapshot),
             "risk": self.risk.snapshot(),
             "reconcile": {
