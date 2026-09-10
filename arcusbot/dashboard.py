@@ -1,0 +1,276 @@
+"""Zero-dependency monitoring dashboard (stdlib http.server).
+
+Serves:
+  GET /            single-page live dashboard (auto-refreshing)
+  GET /api/status  the engine status JSON
+  GET /api/report  the PnL report JSON
+  GET /healthz     liveness
+
+Started automatically when BOT_METRICS_PORT is set. Binds 0.0.0.0 so it works
+behind a preview proxy.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Callable
+
+log = logging.getLogger("arcusbot.dashboard")
+
+PAGE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Arcus Testnet Bot</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#0b0e14;--panel:#141922;--line:#232b39;--fg:#e6edf3;--dim:#8b98ab;
+--good:#3fb950;--bad:#f85149;--warn:#d29922;--acc:#58a6ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;
+gap:16px;align-items:center;flex-wrap:wrap}
+h1{font-size:15px;margin:0;letter-spacing:.5px}
+.badge{padding:2px 8px;border-radius:10px;border:1px solid var(--line);font-size:12px;color:var(--dim)}
+.badge.live{color:var(--good);border-color:var(--good)}
+.badge.halt{color:var(--bad);border-color:var(--bad)}
+main{padding:18px;display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}
+.card h2{font-size:12px;margin:0 0 10px;color:var(--dim);text-transform:uppercase;letter-spacing:1px}
+.kv{display:flex;justify-content:space-between;gap:10px;padding:3px 0}
+.kv span:last-child{color:var(--fg);font-weight:600}
+.big{font-size:26px;font-weight:700;margin:4px 0}
+.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}.dim{color:var(--dim)}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;color:var(--dim);font-weight:500;padding:4px 6px;border-bottom:1px solid var(--line)}
+td{padding:4px 6px;border-bottom:1px solid #1b212c}
+.wide{grid-column:1/-1}
+.bar{height:6px;background:#1b212c;border-radius:3px;overflow:hidden;margin:6px 0 10px}
+.bar i{display:block;height:100%;background:var(--acc);width:0}
+footer{padding:10px 20px;color:var(--dim);font-size:12px}
+footer a{color:var(--acc);text-decoration:none}
+footer a:hover{text-decoration:underline}
+</style></head><body>
+<header>
+  <h1>ARCUS BOT</h1>
+  <span class="badge" id="venue">-</span>
+  <span class="badge" id="mode">-</span>
+  <span class="badge" id="strategy">-</span>
+  <span class="badge" id="risk">-</span>
+  <span class="badge" id="uptime">-</span>
+</header>
+<main>
+  <div class="card" id="healthcard" style="grid-column:1/-1">
+    <h2>Status</h2>
+    <div class="big" id="health">-</div>
+    <div class="kv"><span id="healthdetail">-</span><span id="healthextra"></span></div>
+  </div>
+  <div class="card"><h2>Net PnL (after fees)</h2>
+    <div class="big" id="net">-</div>
+    <div class="kv"><span>gross</span><span id="gross">-</span></div>
+    <div class="kv"><span>fees paid</span><span id="fees">-</span></div>
+    <div class="kv"><span>rebates</span><span id="rebates">-</span></div>
+    <div class="kv"><span>fee coverage</span><span id="cover">-</span></div>
+    <div class="kv"><span>net bps of volume</span><span id="bps">-</span></div>
+  </div>
+  <div class="card"><h2>Volume</h2>
+    <div class="big" id="vol">-</div>
+    <div class="kv"><span>per hour</span><span id="volh">-</span></div>
+    <div class="kv"><span>maker share</span><span id="maker">-</span></div>
+    <div class="kv"><span>fills</span><span id="fills">-</span></div>
+    <div class="kv"><span>orders / cancels</span><span id="oc">-</span></div>
+  </div>
+  <div class="card"><h2>Risk</h2>
+    <div class="kv"><span>state</span><span id="rstate">-</span></div>
+    <div class="kv"><span>equity</span><span id="equity">-</span></div>
+    <div class="kv"><span>free collateral</span><span id="freecoll">-</span></div>
+    <div class="kv"><span>drawdown</span><span id="dd">-</span></div>
+    <div class="kv"><span>orders/min</span><span id="opm">-</span></div>
+    <div class="kv"><span>rejects</span><span id="rej">-</span></div>
+    <div class="kv"><span>reasons</span><span id="reasons" class="dim">-</span></div>
+  </div>
+  <div class="card"><h2>Fees &amp; connectivity</h2>
+    <div class="kv"><span>tier</span><span id="tier">-</span></div>
+    <div class="kv"><span>maker / taker</span><span id="mt">-</span></div>
+    <div class="kv"><span>next tier</span><span id="ntier">-</span></div>
+    <div class="kv"><span>next tier saves</span><span id="nsave">-</span></div>
+    <div class="kv"><span>ws connected</span><span id="wsc">-</span></div>
+    <div class="kv"><span>ws reconnects</span><span id="wsr">-</span></div>
+    <div class="kv"><span>ip weight left</span><span id="ipb">-</span></div>
+  </div>
+  <div class="card"><h2>Lifetime (across restarts)</h2>
+    <div class="big" id="ltvol">-</div>
+    <div class="kv"><span>sessions / fills</span><span id="ltsess">-</span></div>
+    <div class="kv"><span>net PnL</span><span id="ltnet">-</span></div>
+    <div class="kv"><span>net bps of volume</span><span id="ltbps">-</span></div>
+    <div class="kv"><span>today's loss</span><span id="dayloss">-</span></div>
+    <div class="kv"><span>drawdown carried</span><span id="ddcarry">-</span></div>
+    <div class="kv"><span>unclean exits</span><span id="crashes">-</span></div>
+  </div>
+  <div class="card"><h2>Capital</h2>
+    <div class="big" id="deployed">-</div>
+    <div class="kv"><span>mode</span><span id="capmode">-</span></div>
+    <div class="kv"><span>reserve (untouchable)</span><span id="reserve">-</span></div>
+    <div class="kv"><span>clip size</span><span id="clip">-</span></div>
+    <div class="kv"><span>max position / market</span><span id="maxpos">-</span></div>
+    <div class="kv"><span>loss limit</span><span id="losslimit">-</span></div>
+    <div class="kv"><span>re-sizes</span><span id="resizes">-</span></div>
+  </div>
+  <div class="card"><h2>VIP progress ($1B)</h2>
+    <div class="big" id="vippct">-</div>
+    <div class="bar"><i id="vipbar"></i></div>
+    <div class="kv"><span>volume</span><span id="vipvol">-</span></div>
+    <div class="kv"><span>remaining</span><span id="viprem">-</span></div>
+    <div class="kv"><span>eta at current rate</span><span id="vipeta">-</span></div>
+    <div class="kv"><span>projected PnL at $1B</span><span id="vippnl">-</span></div>
+  </div>
+  <div class="card wide"><h2>Markets</h2>
+    <table><thead><tr><th>market</th><th>bid</th><th>ask</th><th>spread bps</th>
+    <th>req edge</th><th>position</th><th>entry</th><th>quotes</th><th>cycles</th>
+    <th>net</th><th>volume</th></tr></thead><tbody id="mk"></tbody></table>
+  </div>
+</main>
+<footer id="ft">loading…</footer>
+<script>
+const f=(x,d=2)=>x===null||x===undefined?'-':Number(x).toLocaleString(undefined,{maximumFractionDigits:d});
+const money=x=>x===null||x===undefined?'-':'$'+f(x,4);
+const cls=v=>Number(v)>0?'good':(Number(v)<0?'bad':'dim');
+async function tick(){
+ try{
+  const s=await (await fetch('/api/status',{cache:'no-store'})).json();
+  const p=s.pnl,r=s.risk,h=s.health||{};
+  const hv=document.getElementById('health');
+  hv.textContent=h.state||'-';
+  // Colour by severity so the verdict reads at a glance, not on inspection.
+  const bad=['HALTED','LOSING','OVEREXPOSED','STUCK'],warn=['RECONCILING','RATE-LIMITED','WARMING-UP'];
+  hv.className='big '+(bad.includes(h.state)?'neg':(warn.includes(h.state)?'':'pos'));
+  document.getElementById('healthcard').style.borderColor=
+    bad.includes(h.state)?'#e5484d':(warn.includes(h.state)?'#f5a524':'#2a2f3a');
+  document.getElementById('healthdetail').textContent=h.detail||'';
+  document.getElementById('healthextra').textContent=
+    (h.all&&h.all.length>1)?h.all.slice(1).map(x=>x.state).join(' · '):'';
+  document.getElementById('venue').textContent=s.venue+' / '+s.network;
+  const m=document.getElementById('mode');m.textContent=s.mode;m.className='badge'+(s.mode==='live'?' live':'');
+  document.getElementById('strategy').textContent=s.strategy;
+  const rb=document.getElementById('risk');rb.textContent=r.state;
+  rb.className='badge'+(r.state==='HALT'?' halt':(r.state==='OK'?' live':''));
+  document.getElementById('uptime').textContent=f(s.uptimeSeconds,0)+'s · '+s.loops+' loops';
+  const net=document.getElementById('net');net.textContent=money(p.netPnl);net.className='big '+cls(p.netPnl);
+  document.getElementById('gross').textContent=money(p.grossPnl);
+  document.getElementById('fees').textContent=money(p.feesPaid);
+  document.getElementById('rebates').textContent=money(p.rebatesEarned);
+  const cv=document.getElementById('cover');cv.textContent=f(p.feeCoverageRatio,2)+'x';
+  cv.className=Number(p.feeCoverageRatio)>=1?'good':'bad';
+  const bp=document.getElementById('bps');bp.textContent=f(p.netBpsOfVolume,3)+' bps';bp.className=cls(p.netBpsOfVolume);
+  document.getElementById('vol').textContent='$'+f(p.volumeUsd,2);
+  document.getElementById('volh').textContent='$'+f(p.volumePerHourUsd,2);
+  document.getElementById('maker').textContent=f(p.makerShare,1)+'%';
+  document.getElementById('fills').textContent=p.fillCount;
+  document.getElementById('oc').textContent=s.ordersSent+' / '+s.cancelsSent;
+  document.getElementById('rstate').textContent=r.state;
+  document.getElementById('equity').textContent=money(r.equity);
+  document.getElementById('freecoll').textContent=money(r.freeCollateral);
+  document.getElementById('dd').textContent=money(p.drawdown);
+  document.getElementById('opm').textContent=r.ordersLastMinute;
+  document.getElementById('rej').textContent=s.rejects+' ('+Object.entries(r.rejections||{}).map(([k,v])=>k+':'+v).join(', ')+')';
+  document.getElementById('reasons').textContent=(r.reasons||[]).join('; ')||(r.haltReason||'none');
+  document.getElementById('tier').textContent=p.fees.level+' '+p.fees.name+' ('+p.fees.source+')';
+  const mt=document.getElementById('mt');
+  mt.textContent=p.fees.maker_bps+' / '+p.fees.taker_bps+' bps'+(p.fees.maker_is_rebate?' (rebate)':'');
+  mt.className=p.fees.maker_is_rebate?'good':'';
+  const nt=p.fees.next_tier;
+  document.getElementById('ntier').textContent=nt?(nt.name+' — '+f(nt.pctComplete,1)+'%, $'+f(nt.remainingVolumeUsd,0)+' to go'):'top tier';
+  document.getElementById('nsave').textContent=nt?(nt.savingBpsPerRoundTrip+' bps/round trip'+(nt.unlocksMakerRebate?' + rebates':'')):'-';
+  const ss=s.session;
+  if(ss){
+    document.getElementById('ltvol').textContent='$'+f(ss.lifetime.volumeUsd,2);
+    document.getElementById('ltsess').textContent=ss.lifetime.sessions+' / '+ss.lifetime.fills;
+    const ln=document.getElementById('ltnet');
+    ln.textContent=money(ss.lifetime.netPnlUsd);ln.className=cls(ss.lifetime.netPnlUsd);
+    const lb=document.getElementById('ltbps');
+    lb.textContent=f(ss.lifetime.netBpsOfVolume,3)+' bps';lb.className=cls(ss.lifetime.netBpsOfVolume);
+    document.getElementById('dayloss').textContent=money(ss.day.lossSoFarUsd);
+    document.getElementById('ddcarry').textContent=money(r.carriedDrawdown);
+    const cr=document.getElementById('crashes');
+    cr.textContent=ss.risk.consecutiveCrashes;cr.className=Number(ss.risk.consecutiveCrashes)>0?'warn':'';
+  }
+  document.getElementById('wsc').textContent=s.ws?(s.ws.connected?'yes':'no'):'n/a';
+  document.getElementById('wsr').textContent=s.ws?s.ws.reconnects:'-';
+  document.getElementById('ipb').textContent=f(s.ipBudget.tokens,0)+' / '+f(s.ipBudget.capacity,0);
+  const byMkt={};(p.markets||[]).forEach(x=>byMkt[x.market]=x);
+  document.getElementById('mk').innerHTML=(s.markets||[]).map(x=>{
+    const b=byMkt[x.market]||{};
+    return `<tr><td>${x.market}</td><td>${f(x.bestBid,4)}</td><td>${f(x.bestAsk,4)}</td>
+    <td>${f(x.spreadBps,2)}</td><td>${f(x.requiredEdgeBps,2)}</td>
+    <td class="${cls(x.position)}">${f(x.position,6)}</td><td>${f(x.avgEntry,4)}</td>
+    <td>${x.liveQuotes}</td><td>${x.cycles}</td>
+    <td class="${cls(b.net)}">${money(b.net)}</td><td>$${f(b.volume,2)}</td></tr>`;}).join('');
+  const c=s.capital;
+  if(c){
+    document.getElementById('deployed').textContent=c.mode==='capital'?money(c.deployableUsd):'fixed';
+    document.getElementById('capmode').textContent=c.mode+(c.mode==='capital'?' ('+f(c.deployablePctOfEquity,1)+'% of equity)':'');
+    document.getElementById('reserve').textContent=money(c.reserveUsd);
+    document.getElementById('clip').textContent=money(c.orderNotionalUsd);
+    document.getElementById('maxpos').textContent=money(c.maxPositionNotionalUsd);
+    document.getElementById('losslimit').textContent=money(c.maxDrawdownUsd);
+    document.getElementById('resizes').textContent=s.capitalResizes;
+  }
+  const v=s.vip;
+  if(v){
+    document.getElementById('vippct').textContent=f(v.pctComplete,4)+'%';
+    document.getElementById('vipbar').style.width=Math.min(100,Number(v.pctComplete))+'%';
+    document.getElementById('vipvol').textContent='$'+f(v.volumeUsd,0);
+    document.getElementById('viprem').textContent='$'+f(v.remainingUsd,0);
+    document.getElementById('vipeta').textContent=v.daysRemaining!==null?f(v.daysRemaining,1)+' days':'-';
+    const vp=document.getElementById('vippnl');
+    vp.textContent=money(v.projectedPnlAtTargetUsd);vp.className=cls(v.projectedPnlAtTargetUsd);
+  }
+  const ref=s.referral&&(s.referral[s.network]||s.referral.testnet);
+  document.getElementById('ft').innerHTML='updated '+new Date().toLocaleTimeString()+
+    ' · session '+p.sessionId+(s.exitReason?(' · STOPPED: '+s.exitReason):'')+
+    (ref?' · <a href="'+ref+'" target="_blank" rel="noopener">refer a friend</a>':'');
+ }catch(e){document.getElementById('ft').textContent='status unavailable: '+e;}
+}
+tick();setInterval(tick,2000);
+</script></body></html>"""
+
+
+def start_dashboard(host: str, port: int, status_fn: Callable[[], dict[str, Any]]) -> ThreadingHTTPServer:
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _send(self, code: int, body: bytes, ctype: str) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            try:
+                if path in {"/", "/index.html"}:
+                    self._send(200, PAGE.encode(), "text/html; charset=utf-8")
+                elif path == "/api/status":
+                    self._send(200, json.dumps(status_fn(), default=str).encode(), "application/json")
+                elif path == "/api/report":
+                    self._send(200, json.dumps(status_fn().get("pnl", {}), default=str).encode(),
+                               "application/json")
+                elif path == "/healthz":
+                    self._send(200, b'{"ok":true}', "application/json")
+                else:
+                    self._send(404, b'{"error":"not found"}', "application/json")
+            except Exception as exc:  # keep the server alive
+                self._send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
+
+        def log_message(self, *args: Any) -> None:
+            return
+
+    server = ThreadingHTTPServer((host, port), Handler)
+    thread = threading.Thread(target=server.serve_forever, name="dashboard", daemon=True)
+    thread.start()
+    log.info("dashboard listening on http://%s:%d", host, port)
+    return server
