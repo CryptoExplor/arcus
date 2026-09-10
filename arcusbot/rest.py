@@ -116,6 +116,21 @@ class ArcusError(RuntimeError):
     def limit_reason(self) -> str:
         return str(self.body.get("reason") or "ip")
 
+    @property
+    def indeterminate(self) -> bool:
+        """True when the order MAY have reached the matching engine.
+
+        A 4xx with a rejection reason is definitive: the order does not exist.
+        A 5xx, a gateway timeout or a transport failure is NOT — the exchange
+        may have accepted the order and lost the response. Treating those as
+        "did not happen" is how a bot ends up with untracked live orders, so
+        callers must reconcile instead of assuming.
+        """
+        if self.status >= 500 or self.status in {408, 425}:
+            return True
+        # 429 is definitive: rate-limited requests are rejected before matching.
+        return False
+
 
 class IPBudget:
     """Client-side mirror of the documented per-IP weight bucket."""

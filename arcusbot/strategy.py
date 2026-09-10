@@ -115,6 +115,7 @@ class MarketWorker:
     last_quote_at: float = 0.0
     last_flatten_at: float = 0.0
     cycles: int = 0
+    adopted: int = 0
     seq: int = 0
     inventory_since: float = 0.0
 
@@ -504,6 +505,26 @@ class MarketWorker:
             reduce_only=intent.reduce_only,
             placed_at=time.time(),
         )
+
+    def adopt(self, client_id: str, order_id: str, info: dict[str, Any]) -> None:
+        """Take ownership of an order the exchange says is live.
+
+        Used by reconciliation for orders whose ack we never saw (lost
+        response, crash between send and record, restart). Adopted quotes are
+        aged from now so they are repriced or cancelled like any other, rather
+        than resting unmanaged.
+        """
+        self.quotes[client_id] = LiveQuote(
+            client_id=client_id,
+            side=str(info.get("side", "BUY")).upper(),
+            price=Decimal(str(info.get("price", "0"))),
+            size=Decimal(str(info.get("size", "0"))),
+            reduce_only=bool(info.get("reduceOnly", False)),
+            placed_at=time.time(),
+        )
+        self.quotes[client_id].order_id = order_id
+        self.quotes[client_id].acked = True
+        self.adopted += 1
 
     def snapshot(self) -> dict[str, Any]:
         book = self.state.book

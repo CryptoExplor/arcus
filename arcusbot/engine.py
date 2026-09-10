@@ -72,6 +72,10 @@ class Engine:
         self.exit_reason = "not-started"
         self.allocation: Allocation | None = None
         self.resizes = 0
+        # Orders whose existence on the exchange is unknown (see reconcile()).
+        self.pending_unknown: dict[str, dict[str, Any]] = {}
+        self.needs_reconcile = False
+        self.reconciles = 0
 
     # ------------------------------------------------------------ bootstrap --
     def _load_markets(self) -> dict[str, dict[str, Any]]:
@@ -460,8 +464,14 @@ class Engine:
                 if resp.get("orderId"):
                     worker.on_ack(intent.client_id, str(resp["orderId"]))
         except ArcusError as exc:
+            if exc.indeterminate:
+                self._mark_indeterminate(intent, f"HTTP {exc.status}")
             self._handle_api_error(exc, intent)
         except Exception as exc:
+            # A transport failure (timeout, reset, DNS) tells us nothing about
+            # whether the matching engine accepted the order. Assume it might
+            # have, and reconcile before opening anything else.
+            self._mark_indeterminate(intent, type(exc).__name__)
             self.risk.note_error(exc)
             log.warning("place failed (%s): %s", type(exc).__name__, exc)
 
@@ -486,6 +496,100 @@ class Engine:
                 self._handle_api_error(exc, intent)
         except Exception as exc:
             self.risk.note_error(exc)
+
+    # ------------------------------------------------------ reconciliation --
+    def _mark_indeterminate(self, intent: OrderIntent, cause: str) -> None:
+        """Record an order whose existence on the exchange is unknown.
+
+        Until it is resolved the engine must not open new exposure: the order
+        may be live, and quoting again on the same side would double the
+        position while the local book shows one clip.
+        """
+        if self.cfg.venue == "sim":
+            return
+        self.pending_unknown[intent.client_id] = {
+            "market": intent.market,
+            "side": intent.side,
+            "size": dec_str(intent.size),
+            "price": dec_str(intent.price),
+            "reduceOnly": intent.reduce_only,
+            "cause": cause,
+            "ts": time.time(),
+        }
+        self.needs_reconcile = True
+        log.warning(
+            "INDETERMINATE place %s %s %s @ %s (%s) — order may be live; "
+            "blocking new opens until reconciled",
+            intent.market, intent.side, dec_str(intent.size), dec_str(intent.price), cause,
+        )
+
+    async def reconcile(self) -> bool:
+        """Re-derive local state from authoritative exchange state.
+
+        Returns True when local and exchange state agree and trading may
+        resume. Never guesses: if the exchange cannot be reached, the caller
+        stays blocked rather than assuming the optimistic case.
+        """
+        if self.cfg.venue == "sim" or not self.cfg.live:
+            self.pending_unknown.clear()
+            self.needs_reconcile = False
+            return True
+
+        try:
+            raw_orders = await asyncio.to_thread(self.rest.open_orders)
+            await self._refresh_positions()
+        except Exception as exc:
+            log.warning("reconciliation failed (%s) — staying blocked", exc)
+            self.risk.note_error(exc)
+            return False
+
+        rows: list[dict[str, Any]] = []
+        if isinstance(raw_orders, dict):
+            for key in ("orders", "openOrders", "data"):
+                if isinstance(raw_orders.get(key), list):
+                    rows = raw_orders[key]
+                    break
+        elif isinstance(raw_orders, list):
+            rows = raw_orders
+
+        live_by_cid = {str(r.get("clientId") or ""): r for r in rows if r.get("clientId")}
+        adopted, vanished = 0, 0
+
+        for cid, info in list(self.pending_unknown.items()):
+            row = live_by_cid.get(cid)
+            if row is not None:
+                # It DID reach the exchange. Adopt it so it is tracked, aged
+                # and cancellable like any other quote.
+                worker = self.workers.get(info["market"])
+                if worker is not None:
+                    worker.adopt(cid, str(row.get("orderId") or ""), info)
+                adopted += 1
+            else:
+                vanished += 1
+            self.pending_unknown.pop(cid, None)
+
+        # Any exchange order we have no record of at all is also adopted, so a
+        # restart or a missed ack cannot leave orphans resting forever.
+        orphans = 0
+        for cid, row in live_by_cid.items():
+            market = str(row.get("marketDisplayName") or row.get("market") or "")
+            worker = self.workers.get(market)
+            if worker is None or cid in worker.quotes:
+                continue
+            worker.adopt(cid, str(row.get("orderId") or ""), {
+                "market": market,
+                "side": str(row.get("side", "")).upper(),
+                "size": row.get("quantity", "0"),
+                "price": row.get("price", "0"),
+                "reduceOnly": bool(row.get("reduceOnly", False)),
+            })
+            orphans += 1
+
+        self.needs_reconcile = False
+        self.reconciles += 1
+        log.info("reconciled: %d exchange order(s); adopted %d unknown, %d never existed, "
+                 "%d orphan(s) adopted", len(live_by_cid), adopted, vanished, orphans)
+        return True
 
     def _handle_api_error(self, exc: ArcusError, intent: OrderIntent) -> None:
         if exc.rate_limited:
@@ -539,6 +643,14 @@ class Engine:
         can_open = verdict.state == OK and self.cfg.aggressive is not None
         if verdict.state in {FLATTEN, HALT}:
             can_open = False
+
+        # An order we cannot account for may be live on the exchange. Opening
+        # more exposure on top of it risks doubling the position, so resolve
+        # the ambiguity first. Closing (reduce-only) stays permitted.
+        if self.needs_reconcile:
+            can_open = False
+            if await self.reconcile():
+                can_open = verdict.state == OK
 
         intents: list[OrderIntent] = []
         for worker in self.workers.values():

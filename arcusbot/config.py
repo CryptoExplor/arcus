@@ -147,6 +147,12 @@ class Config:
     referral_mainnet: str = DEFAULT_REFERRAL_MAINNET
     show_referral: bool = True
 
+    # -------------------------------------------------------------- mainnet --
+    # Live mainnet execution requires ALL of these; see arcusbot/mainnet.py.
+    mainnet_enabled: bool = False
+    mainnet_capital_usd: Decimal = Decimal("0")
+    mainnet_ack: str = ""
+
     # ----------------------------------------------------------- persistence --
     # Carry drawdown/daily-loss/lifetime-volume across restarts so a crash loop
     # cannot reset the kill switch. Disable for sweeps, backtests and CI.
@@ -272,6 +278,9 @@ class Config:
             referral_testnet=str(_env("ARCUS_REFERRAL_TESTNET", DEFAULT_REFERRAL_TESTNET)),
             referral_mainnet=str(_env("ARCUS_REFERRAL_MAINNET", DEFAULT_REFERRAL_MAINNET)),
             show_referral=_bool("BOT_SHOW_REFERRAL", True),
+            mainnet_enabled=_bool("BOT_MAINNET_ENABLED", False),
+            mainnet_capital_usd=_dec("BOT_MAINNET_CAPITAL_USD", "0"),
+            mainnet_ack=str(_env("BOT_MAINNET_ACK", "")),
             persist_state=_bool("BOT_PERSIST_STATE", True),
             carry_drawdown=_bool("RISK_CARRY_DRAWDOWN", True),
             max_restart_crashes=_int("RISK_MAX_RESTART_CRASHES", 0),
@@ -367,9 +376,15 @@ class Config:
 
         if self.flatten_tif not in {"IOC", "FOK", "GTT", "ALO"}:
             problems.append(f"BOT_FLATTEN_TIF must be IOC/FOK/GTT/ALO, got {self.flatten_tif!r}")
-        if self.network == "mainnet" and self.mode == "live":
+        # Mainnet live execution is gated by arcusbot/mainnet.py, which requires
+        # several explicit opt-ins and fails closed on any malformed value.
+        # Imported lazily to keep config free of heavier imports.
+        from .mainnet import evaluate_gate
+
+        gate = evaluate_gate(self)
+        if gate.is_mainnet_live_attempt and not gate.allowed:
             problems.append(
-                "refusing to run live on mainnet: this bot is a testnet volume harness. "
-                "Set ARCUS_NETWORK=testnet (or BOT_MODE=dry-run)."
+                "refusing to run live on mainnet — " + "; ".join(gate.reasons)
+                + ". See docs/BOT_OPERATIONS.md (mainnet section)."
             )
         return problems
