@@ -32,7 +32,7 @@ from .referral import all_referral_links, banner
 from .rest import ArcusError, ArcusREST
 from .session import SessionStore
 from .scaling import dec_str
-from .signing import Signer
+from .signing import Signer, now_ns
 from .sim import SIM_FEE_TIERS
 
 
@@ -204,6 +204,19 @@ def cmd_preflight(cfg: Config, as_json: bool) -> int:
             check("gateway", True, f"{cfg.rest_url} reachable")
         except ArcusError as exc:
             check("gateway", False, str(exc))
+
+        # Every signed request carries X-Timestamp and is rejected outside a
+        # +/-30s window. A skewed laptop clock makes ALL orders fail with an
+        # opaque Unauthorized, so surface it here instead.
+        try:
+            skew_s = abs(rest.server_time_ns() - now_ns()) / 1e9
+            check("clock", skew_s < 20,
+                  f"local clock is {skew_s:.1f}s from the exchange "
+                  f"(signed requests are rejected beyond 30s — sync with NTP)"
+                  if skew_s >= 20 else f"within {skew_s:.1f}s of the exchange",
+                  fatal=skew_s >= 30)
+        except ArcusError as exc:
+            check("clock", True, f"could not read server time ({exc})", fatal=False)
 
         try:
             markets = rest.markets(refresh=True)

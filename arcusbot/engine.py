@@ -34,7 +34,7 @@ from .capital import Allocation, apply_allocation, needs_resize, plan_capital
 from .adaptive import AdaptiveController
 from .mainnet import apply_mainnet_limits, assert_capital_within_cap, evaluate_gate
 from .config import Config
-from .pnl import FeeSchedule, Fill, PnLTracker, fills_from_ws
+from .pnl import FeeSchedule, PnLTracker, fills_from_ws
 from .referral import all_referral_links, banner, vip_progress
 from .rest import ArcusError, ArcusREST
 from .session import SessionStore
@@ -450,8 +450,13 @@ class Engine:
                 self._on_orders(contents)
             elif channel == "funding":
                 self._on_funding(contents)
-        except Exception:
-            log.exception("failed handling %s frame", channel)
+        except Exception as exc:
+            # A crash here means a fill/order/position frame was DROPPED. That
+            # is silent state divergence, so it must count as an API error:
+            # otherwise evidence reports apiErrors=0 while data is being lost,
+            # and the consecutive-error kill switch never trips.
+            self.risk.note_error(f"ws {channel} frame: {exc}")
+            log.exception("failed handling %s frame — counted as an API error", channel)
 
     def _sync_positions(self, payload: Any, authoritative: bool = False) -> None:
         """Exchange positions are inventory truth; reconcile the local book.

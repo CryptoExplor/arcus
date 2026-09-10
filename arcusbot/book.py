@@ -55,14 +55,6 @@ class BookState:
     def best_ask(self) -> Decimal | None:
         return self.asks[0].price if self.asks else None
 
-    @property
-    def best_bid_size(self) -> Decimal:
-        return self.bids[0].size if self.bids else Decimal(0)
-
-    @property
-    def best_ask_size(self) -> Decimal:
-        return self.asks[0].size if self.asks else Decimal(0)
-
     def top_depth_usd(self, levels: int = 5) -> Decimal | None:
         """Notional resting within the top N levels of both sides.
 
@@ -100,10 +92,6 @@ class BookState:
             and self.best_ask is not None
             and self.best_bid >= self.best_ask
         )
-
-    def depth_notional(self, side: str, levels: int = 5) -> Decimal:
-        rows = self.bids if side == "BUY" else self.asks
-        return sum((lvl.price * lvl.size for lvl in rows[:levels]), Decimal(0))
 
 
 @dataclass(slots=True)

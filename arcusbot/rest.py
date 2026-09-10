@@ -17,16 +17,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from decimal import Decimal
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping
 
 from .config import Config
-from .scaling import D, dec_str, snap_price, snap_size, to_quantums, to_ticks
+from .scaling import dec_str, snap_price, snap_size, to_quantums, to_ticks
 from .signing import (
     Signer,
     cancel_payload,
     good_til_us,
-    modify_payload,
     now_ns,
     place_payload,
 )
@@ -272,16 +270,9 @@ class ArcusREST:
     def bbo(self, market: str) -> dict[str, Any]:
         return self.get(f"/v1/bbo/{urllib.parse.quote(market)}")
 
-    def l2(self, market: str, n_levels: int = 10) -> dict[str, Any]:
-        return self.get(f"/v1/l2OrderBook/{urllib.parse.quote(market)}", nLevels=n_levels)
-
     def fee_tiers(self) -> Any:
         return self.get("/v1/feetiers")
 
-    def live_prices(self) -> Any:
-        return self.get("/v1/livePrices")
-
-    # ------------------------------------------------- account (public reads) --
     def account(self) -> dict[str, Any]:
         return self.get("/v1/account", address=self.cfg.address, accountIndex=self.cfg.account_index)
 
@@ -308,13 +299,6 @@ class ArcusREST:
 
     def account_stats(self, **params: Any) -> Any:
         return self.get("/v1/accountStats", address=self.cfg.address, **params)
-
-    def rate_limit_usage(self) -> Any:
-        return self.get(
-            "/v1/currentRateLimitUsage",
-            address=self.cfg.address,
-            accountIndex=self.cfg.account_index,
-        )
 
     def api_keys(self) -> Any:
         return self.get("/v1/apiKeys", address=self.cfg.address)
@@ -392,30 +376,6 @@ class ArcusREST:
         log.debug("placeOrder payload=%s", payload)
         return self._request("POST", "/v1/placeOrder", body, signer.headers(ts, signature))
 
-    def batch_place(self, orders: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-        """Each element is signed on its own; all share one X-Timestamp.
-
-        `orders` elements are kwargs for build_order plus market/side/quantity/price.
-        """
-        signer = self._require_signer()
-        ts = now_ns()
-        elements: list[dict[str, Any]] = []
-        for spec in orders:
-            spec = dict(spec)
-            market = spec.pop("market")
-            side = spec.pop("side")
-            quantity = spec.pop("quantity")
-            price = spec.pop("price")
-            fields, body = self.build_order(market, side, quantity, price, ts_ns=ts, **spec)
-            _, signature = signer.sign_typed(fields)
-            body["signature"] = signature
-            elements.append(body)
-        if not elements:
-            return {"responses": []}
-        # X-Signature must be PRESENT on a batch; its value is not verified.
-        headers = signer.headers(ts, elements[0]["signature"])
-        return self._request("POST", "/v1/batchPlaceOrders", {"orders": elements}, headers)
-
     def cancel_order(
         self,
         market: str | int,
@@ -450,89 +410,6 @@ class ArcusREST:
         log.debug("cancelOrder payload=%s", payload)
         return self._request("POST", "/v1/cancelOrder", body, signer.headers(ts, signature))
 
-    def batch_cancel(self, cancels: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-        signer = self._require_signer()
-        ts = now_ns()
-        elements: list[dict[str, Any]] = []
-        for spec in cancels:
-            m = self.market(spec["market"])
-            fields = cancel_payload(
-                address=self.cfg.address,
-                account_index=self.cfg.account_index,
-                ts_ns=ts,
-                market_id=int(m["marketId"]),
-                order_id=spec.get("order_id"),
-                client_id=spec.get("client_id"),
-            )
-            _, signature = signer.sign_typed(fields)
-            body: dict[str, Any] = {
-                "address": self.cfg.address,
-                "accountIndex": self.cfg.account_index,
-                "marketId": int(m["marketId"]),
-                "timestamp": ts,
-                "signature": signature,
-            }
-            if spec.get("order_id"):
-                body["kind"] = "orderId"
-                body["orderId"] = str(spec["order_id"])
-            else:
-                body["kind"] = "clientId"
-                body["clientId"] = spec["client_id"]
-            elements.append(body)
-        if not elements:
-            return {"responses": []}
-        headers = signer.headers(ts, elements[0]["signature"])
-        return self._request("POST", "/v1/batchCancelOrders", {"cancels": elements}, headers)
-
-    def modify_order(
-        self,
-        market: str | int,
-        order_id: str,
-        *,
-        price: Any,
-        quantity: Any,
-        side: str,
-        tif: str = "GTT",
-        reduce_only: bool = False,
-        client_id: str | None = None,
-        gtt_us: int | None = None,
-    ) -> dict[str, Any]:
-        signer = self._require_signer()
-        m = self.market(market)
-        ts = now_ns()
-        px = snap_price(m, price, side=side)
-        qty = snap_size(m, quantity)
-        gtt = gtt_us if gtt_us is not None else good_til_us()
-        fields = modify_payload(
-            address=self.cfg.address,
-            account_index=self.cfg.account_index,
-            ts_ns=ts,
-            gtt_us=gtt,
-            market_id=int(m["marketId"]),
-            order_id=order_id,
-            price_ticks=to_ticks(px, m),
-            size_quantums=to_quantums(qty, m),
-            side=side,
-            tif=tif,
-            reduce_only=reduce_only,
-            client_id=client_id,
-        )
-        _, signature = signer.sign_typed(fields)
-        body: dict[str, Any] = {
-            "address": self.cfg.address,
-            "accountIndex": self.cfg.account_index,
-            "marketId": int(m["marketId"]),
-            "orderId": str(order_id),
-            "price": dec_str(px),
-            "quantity": dec_str(qty),
-            "goodTilTime": str(gtt),
-            "timestamp": ts,
-        }
-        if client_id:
-            body["clientId"] = client_id
-        return self._request("POST", "/v1/modifyOrder", body, signer.headers(ts, signature))
-
-    # ------------------------------------------------ scheme-2 (legacy) ops --
     def _legacy(self, action: str, body: dict[str, Any]) -> dict[str, Any]:
         signer = self._require_signer()
         ts = now_ns()
@@ -564,17 +441,3 @@ class ArcusREST:
         return self._legacy("scheduleCancelAllDeadMansSwitch", body)
 
     # ------------------------------------------------------------- helpers ---
-    def notional_to_size(self, market: str | int, notional_usd: Any, price: Any) -> Decimal:
-        """USD notional -> base-asset size, snapped and floored to market limits."""
-        m = self.market(market)
-        px = D(price)
-        if px <= 0:
-            return Decimal(0)
-        size = snap_size(m, D(notional_usd) / px)
-        min_size = D(m.get("minOrderSize", "0"))
-        max_size = D(m.get("maxOrderSize", "1e18"))
-        if size < min_size:
-            size = snap_size(m, min_size)
-        if size > max_size:
-            size = snap_size(m, max_size)
-        return size

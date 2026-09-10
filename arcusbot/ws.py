@@ -100,8 +100,6 @@ class ArcusWS:
                     for frame in self._subscriptions:
                         await ws.send(json.dumps(frame))
                     async for raw in ws:
-                        self.messages_in += 1
-                        self.last_message_at = time.time()
                         await self._dispatch(raw)
             except asyncio.CancelledError:
                 raise
@@ -124,6 +122,10 @@ class ArcusWS:
             backoff = min(self.cfg.reconnect_max_s, backoff * 2)
 
     async def _dispatch(self, raw: str | bytes) -> None:
+        # Counted here rather than in the read loop so the freshness signal
+        # covers every path that produces a frame.
+        self.messages_in += 1
+        self.last_message_at = time.time()
         try:
             msg = json.loads(raw)
         except Exception:

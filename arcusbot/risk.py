@@ -219,7 +219,6 @@ class RiskManager:
             self.last_verdict = verdict
             return verdict
 
-        net = self.pnl.net_pnl()
         drawdown = self.effective_drawdown()
         daily_loss = self.effective_daily_loss()
 

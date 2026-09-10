@@ -155,9 +155,11 @@ class Config:
 
     # -------------------------------------------------------------- mainnet --
     # Live mainnet execution requires ALL of these; see arcusbot/mainnet.py.
-    mainnet_enabled: bool = False
-    mainnet_capital_usd: Decimal = Decimal("0")
-    mainnet_ack: str = ""
+    # NOTE: BOT_MAINNET_ENABLED / _ACK / _CAPITAL_USD are deliberately NOT
+    # parsed into this config. arcusbot/mainnet.py reads them straight from the
+    # environment with strict parsing, so a malformed value is an error rather
+    # than a silent default. Mirroring them here would create a second, laxer
+    # source of truth for the one decision that risks real money.
 
     # ----------------------------------------------------------- persistence --
     # Carry drawdown/daily-loss/lifetime-volume across restarts so a crash loop
@@ -210,7 +212,6 @@ class Config:
     sim_seed: int = 7
     sim_maker_fill_prob: float = 0.55
     sim_vol_bps: float = 6.0
-    sim_latency_ms: int = 25
     sim_speed: float = 1.0
     sim_uninformed_rate: float = 0.25   # chance/step a random taker lifts our touch
 
@@ -286,9 +287,6 @@ class Config:
             show_referral=_bool("BOT_SHOW_REFERRAL", True),
             session_regime=str(_env("BOT_SESSION_REGIME", "")),
             session_label=str(_env("BOT_SESSION_LABEL", "")),
-            mainnet_enabled=_bool("BOT_MAINNET_ENABLED", False),
-            mainnet_capital_usd=_dec("BOT_MAINNET_CAPITAL_USD", "0"),
-            mainnet_ack=str(_env("BOT_MAINNET_ACK", "")),
             persist_state=_bool("BOT_PERSIST_STATE", True),
             carry_drawdown=_bool("RISK_CARRY_DRAWDOWN", True),
             max_restart_crashes=_int("RISK_MAX_RESTART_CRASHES", 0),
@@ -327,7 +325,6 @@ class Config:
             sim_seed=_int("SIM_SEED", 7),
             sim_maker_fill_prob=_float("SIM_MAKER_FILL_PROB", 0.55),
             sim_vol_bps=_float("SIM_VOL_BPS", 6.0),
-            sim_latency_ms=_int("SIM_LATENCY_MS", 25),
             sim_speed=_float("SIM_SPEED", 1.0),
             sim_uninformed_rate=_float("SIM_UNINFORMED_RATE", 0.25),
         )
