@@ -39,6 +39,40 @@ USDG), or `tools/fund_testnet.py` for more.
 
 ---
 
+## Capital management
+
+Tell the bot how much of your balance it may use, and it derives every sizing
+knob from that one number:
+
+```bash
+BOT_CAPITAL_PCT=30      # deploy 30% of equity …
+BOT_RESERVE_USD=150     # … but never touch this much
+```
+
+```
+deployable      = min(budget, equity − reserve)
+exposure_budget = deployable × leverage × utilisation   (utilisation 0.5 by default)
+per_market      = exposure_budget ÷ markets
+clip            = per_market ÷ BOT_CAPITAL_CLIPS
+```
+
+Preview the plan before committing to it:
+
+```bash
+python -m arcusbot preflight --capital-pct 30 --reserve 150
+#  [PASS] sizing     capital — equity $1000, deploying $300 (30%), reserve $150
+#                    | exposure budget $450 across 2 market(s) -> clip $75,
+#                    max position $225/market
+#  [PASS] lossLimit  kill switch at $25 drawdown (2.5% of equity)
+```
+
+The reserve is enforced as the free-collateral floor, not just subtracted up
+front, so the bot stops opening before it can eat into it. Sizing re-derives
+itself when equity drifts 20% (`BOT_CAPITAL_RESIZE_PCT`), and a budget too
+small for one $5 clip refuses to start with an actionable message rather than
+failing on every order. Leave the capital knobs at `0` to size by hand instead.
+Details in [`docs/CAPITAL.md`](docs/CAPITAL.md).
+
 ## Commands
 
 | Command | Network | Sends orders | Purpose |
@@ -92,23 +126,53 @@ are in [`docs/STRATEGY.md`](docs/STRATEGY.md).
 
 ## Monitoring
 
-`--port 8080` serves a live dashboard plus `/api/status`, `/api/report`,
-`/healthz`. On disk: `state/status.json`, `state/fills.jsonl` (append-only),
+`--port 8080` serves a live dashboard (PnL, volume, risk, capital, VIP
+progress, per-market table) plus `/api/status`, `/api/report`, `/healthz`. On
+disk: `state/status.json`, `state/fills.jsonl` (append-only),
 `state/report-*.json`, `logs/bot-*.log`.
 
 Watch `netBpsOfVolume` ≥ 0, `feeCoverageRatio` ≥ 1, high `makerShare`,
 `risk.state == OK`. Volume climbing while net PnL falls means stop.
+
+## The $1B VIP milestone
+
+Both networks offer VIP status at $1B of volume, so the bot tracks it — and
+prints the arithmetic that matters:
+
+```
+VIP progress: $234.28 of $1000000000 (0.000023%) — 1079.5 days at the current
+rate, costing ~$694297.25 in net PnL
+```
+
+That "costing" clause is the point. Chasing $1B at a negative edge has a
+six-figure price tag; the milestone is only worth pursuing once
+`netBpsOfVolume` is positive, at which point the line reads "earning". Get the
+edge right first, then scale clip size — quoting faster mostly burns rate limit.
+
+## Referral
+
+Signing up through these links credits this tool:
+
+- testnet — <https://testnet.arcus.xyz/ref/AAAA>
+- mainnet — <https://app.arcus.xyz/ref/AIAGENT>
+
+Attribution happens at **signup**, in a browser; it never touches an order or
+affects execution. Forking? Put your own codes in `ARCUS_REFERRAL_TESTNET` /
+`ARCUS_REFERRAL_MAINNET`, or set `BOT_SHOW_REFERRAL=false` to hide the banner.
 
 ---
 
 ## Layout
 
 ```
-arcusbot/    signing scaling config rest ws book pnl risk strategy sim sweep engine dashboard cli
+arcusbot/    signing scaling config capital referral rest ws book pnl risk
+             strategy sim sweep engine dashboard cli
 tools/       onboard.py (API key registration), fund_testnet.py (on-chain deposit)
-tests/       68 offline tests — signing, tick math, PnL identity, risk/strategy
-docs/        BOT_OPERATIONS.md · ARCUS_PLATFORM.md · STRATEGY.md
+tests/       130 offline tests — signing, tick math, PnL identity, risk,
+             capital, referral, .env parsing
+docs/        BOT_OPERATIONS.md · ARCUS_PLATFORM.md · STRATEGY.md · CAPITAL.md
 llms.txt     single-file agent guide to the bot and the venue
+.env.example template for .env (which is gitignored)
 ```
 
 ## Documentation
@@ -119,6 +183,7 @@ llms.txt     single-file agent guide to the bot and the venue
 | [`docs/BOT_OPERATIONS.md`](docs/BOT_OPERATIONS.md) | Runbook: setup, config reference, monitoring, troubleshooting |
 | [`docs/ARCUS_PLATFORM.md`](docs/ARCUS_PLATFORM.md) | Venue reference: auth schemes, order rules, rate limits, channels |
 | [`docs/STRATEGY.md`](docs/STRATEGY.md) | The economics, the failure modes, and how the edge was measured |
+| [`docs/CAPITAL.md`](docs/CAPITAL.md) | Budget → order sizing, reserves, re-sizing, guard rails |
 
 ---
 
@@ -133,4 +198,4 @@ llms.txt     single-file agent guide to the bot and the venue
   Set `RISK_DEAD_MANS_SWITCH_S` for unattended runs.
 - Testnet contract addresses change on every redeploy; verify before funding.
 
-Run `.venv/bin/python -m pytest tests -q` after any change.
+Run `.venv/bin/python -m pytest tests -q` (130 tests, no network) after any change.

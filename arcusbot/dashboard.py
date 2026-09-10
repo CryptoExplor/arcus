@@ -46,7 +46,11 @@ table{width:100%;border-collapse:collapse;font-size:12px}
 th{text-align:left;color:var(--dim);font-weight:500;padding:4px 6px;border-bottom:1px solid var(--line)}
 td{padding:4px 6px;border-bottom:1px solid #1b212c}
 .wide{grid-column:1/-1}
+.bar{height:6px;background:#1b212c;border-radius:3px;overflow:hidden;margin:6px 0 10px}
+.bar i{display:block;height:100%;background:var(--acc);width:0}
 footer{padding:10px 20px;color:var(--dim);font-size:12px}
+footer a{color:var(--acc);text-decoration:none}
+footer a:hover{text-decoration:underline}
 </style></head><body>
 <header>
   <h1>ARCUS TESTNET BOT</h1>
@@ -87,6 +91,23 @@ footer{padding:10px 20px;color:var(--dim);font-size:12px}
     <div class="kv"><span>ws connected</span><span id="wsc">-</span></div>
     <div class="kv"><span>ws reconnects</span><span id="wsr">-</span></div>
     <div class="kv"><span>ip weight left</span><span id="ipb">-</span></div>
+  </div>
+  <div class="card"><h2>Capital</h2>
+    <div class="big" id="deployed">-</div>
+    <div class="kv"><span>mode</span><span id="capmode">-</span></div>
+    <div class="kv"><span>reserve (untouchable)</span><span id="reserve">-</span></div>
+    <div class="kv"><span>clip size</span><span id="clip">-</span></div>
+    <div class="kv"><span>max position / market</span><span id="maxpos">-</span></div>
+    <div class="kv"><span>loss limit</span><span id="losslimit">-</span></div>
+    <div class="kv"><span>re-sizes</span><span id="resizes">-</span></div>
+  </div>
+  <div class="card"><h2>VIP progress ($1B)</h2>
+    <div class="big" id="vippct">-</div>
+    <div class="bar"><i id="vipbar"></i></div>
+    <div class="kv"><span>volume</span><span id="vipvol">-</span></div>
+    <div class="kv"><span>remaining</span><span id="viprem">-</span></div>
+    <div class="kv"><span>eta at current rate</span><span id="vipeta">-</span></div>
+    <div class="kv"><span>projected PnL at $1B</span><span id="vippnl">-</span></div>
   </div>
   <div class="card wide"><h2>Markets</h2>
     <table><thead><tr><th>market</th><th>bid</th><th>ask</th><th>spread bps</th>
@@ -141,8 +162,30 @@ async function tick(){
     <td class="${cls(x.position)}">${f(x.position,6)}</td><td>${f(x.avgEntry,4)}</td>
     <td>${x.liveQuotes}</td><td>${x.cycles}</td>
     <td class="${cls(b.net)}">${money(b.net)}</td><td>$${f(b.volume,2)}</td></tr>`;}).join('');
-  document.getElementById('ft').textContent='updated '+new Date().toLocaleTimeString()+
-    ' · session '+p.sessionId+(s.exitReason?(' · STOPPED: '+s.exitReason):'');
+  const c=s.capital;
+  if(c){
+    document.getElementById('deployed').textContent=c.mode==='capital'?money(c.deployableUsd):'fixed';
+    document.getElementById('capmode').textContent=c.mode+(c.mode==='capital'?' ('+f(c.deployablePctOfEquity,1)+'% of equity)':'');
+    document.getElementById('reserve').textContent=money(c.reserveUsd);
+    document.getElementById('clip').textContent=money(c.orderNotionalUsd);
+    document.getElementById('maxpos').textContent=money(c.maxPositionNotionalUsd);
+    document.getElementById('losslimit').textContent=money(c.maxDrawdownUsd);
+    document.getElementById('resizes').textContent=s.capitalResizes;
+  }
+  const v=s.vip;
+  if(v){
+    document.getElementById('vippct').textContent=f(v.pctComplete,4)+'%';
+    document.getElementById('vipbar').style.width=Math.min(100,Number(v.pctComplete))+'%';
+    document.getElementById('vipvol').textContent='$'+f(v.volumeUsd,0);
+    document.getElementById('viprem').textContent='$'+f(v.remainingUsd,0);
+    document.getElementById('vipeta').textContent=v.daysRemaining!==null?f(v.daysRemaining,1)+' days':'-';
+    const vp=document.getElementById('vippnl');
+    vp.textContent=money(v.projectedPnlAtTargetUsd);vp.className=cls(v.projectedPnlAtTargetUsd);
+  }
+  const ref=s.referral&&(s.referral[s.network]||s.referral.testnet);
+  document.getElementById('ft').innerHTML='updated '+new Date().toLocaleTimeString()+
+    ' · session '+p.sessionId+(s.exitReason?(' · STOPPED: '+s.exitReason):'')+
+    (ref?' · <a href="'+ref+'" target="_blank" rel="noopener">refer a friend</a>':'');
  }catch(e){document.getElementById('ft').textContent='status unavailable: '+e;}
 }
 tick();setInterval(tick,2000);

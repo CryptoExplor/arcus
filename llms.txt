@@ -26,6 +26,7 @@ Everything in the codebase follows from that single sentence:
 | --- | --- | --- |
 | Volume | Continuous two-sided quoting, both sides re-posted after every fill | `strategy.MarketWorker.tick` |
 | Don't lose funds | Position caps, drawdown kill switch, reduce-only closes, collateral floor | `risk.RiskManager` |
+| Bounded exposure | Sizing derived from an explicit budget + untouchable reserve | `capital.plan_capital` |
 | Cover fees | Every quoted pair must clear `fees(maker+maker) + buffer + volatility` | `strategy.MarketWorker.edge_bps` |
 | Measure it | Per-fill average-cost ledger, fee-aware net PnL, `feeCoverageRatio` | `pnl.PnLTracker` |
 | Be aggressive safely | ALO (post-only) quotes can never pay taker fees; only inventory closes cross | `strategy`, `sim` |
@@ -191,6 +192,8 @@ outside them; sizing must respect the off-hours margin or you get
 ```
 cli.py         argument parsing, logging, command dispatch
 config.py      typed config from env/.env + validate()  <- refuses live-on-mainnet
+capital.py     budget -> clip/position/loss limits, reserves, mid-run re-sizing
+referral.py    referral links + $1B VIP milestone arithmetic
 signing.py     Ed25519, Scheme 1 typed payloads, Scheme 2 legacy
 scaling.py     decimal <-> ticks/quantums, tier-aware snapping, slippage clamp
 rest.py        signed REST client + client-side IP weight budget
@@ -242,6 +245,52 @@ ws frames -> BookState/MarketState -> observe_vol()
 
 ---
 
+## 6b. Capital management
+
+Two sizing modes. **fixed** (default) takes the notionals literally from config.
+**capital** activates when `BOT_CAPITAL_USD` or `BOT_CAPITAL_PCT` is non-zero
+and derives everything from a budget:
+
+```
+deployable      = min(budget, equity − reserve)
+exposure_budget = deployable × leverage × utilisation
+per_market      = exposure_budget ÷ market_count
+clip            = per_market ÷ BOT_CAPITAL_CLIPS
+max_position    = per_market
+max_inventory   = per_market × BOT_CAPITAL_INVENTORY_FRACTION
+```
+
+Rules an agent must not break when touching `capital.py`:
+
+- **`utilisation` < 1 is deliberate.** It is the gap between what margin allows
+  and what the bot deploys. Setting it to 1 invites liquidation.
+- **The reserve is enforced twice** — subtracted from the budget *and* used as
+  `min_free_collateral_usd`. Only the second makes it real.
+- **Both `_USD` and `_PCT` set → the lower wins.**
+- **Unknown equity never guesses.** Mode becomes `unfunded` and the fixed
+  notionals stand.
+- **A clip under $5 is raised to $5**; a budget that cannot fund even one clip
+  halts at startup with an actionable message rather than failing every order.
+- **Capital sizing feeds the risk manager, never bypasses it.**
+- Re-sizing happens only past `BOT_CAPITAL_RESIZE_PCT` equity drift, so caps do
+  not jitter under open inventory.
+
+Full detail: `docs/CAPITAL.md`. Tests: `tests/test_capital.py`.
+
+## 6c. Referral and the $1B VIP milestone
+
+`referral.py` holds signup links (`ARCUS_REFERRAL_TESTNET` default `AAAA` →
+`https://testnet.arcus.xyz/ref/AAAA`; `ARCUS_REFERRAL_MAINNET` default
+`AIAGENT` → `https://app.arcus.xyz/ref/AIAGENT`). **Referral attribution is a
+signup-time browser concern — never inject a code into an order payload.** The
+banner is suppressed by `BOT_SHOW_REFERRAL=false`.
+
+`vip_progress()` tracks the advertised "$1B volume unlocks VIP" target and
+reports percent complete, ETA at the current rate, and — the number that
+actually matters — `projectedPnlAtTargetUsd = remaining × netBps / 10_000`.
+At a negative edge that is a large negative number, which is the honest signal
+that chasing the milestone costs money. Do not present VIP progress without it.
+
 ## 7. Risk model
 
 Per order (`risk.check_order`): market ONLINE, min notional, max order size,
@@ -280,8 +329,13 @@ Shutdown is always `cancel-all -> flatten (reduce-only IOC, retried) -> report`.
 7. **`net = realized + unrealized + funding + rebates − fees`** — asserted in
    `selftest` and `test_net_pnl_identity_includes_fees_and_rebates`.
 8. **Live mode on mainnet is refused** in `config.validate()`.
+9. **The reserve is never traded into** — it is both subtracted from the budget
+   and enforced as the free-collateral floor.
+10. **Referral codes never enter an order payload.** Signup-time only.
+11. **`.env` is gitignored and never committed**; `.env.example` carries the
+    same keys with no secrets.
 
-Run `python -m pytest tests -q` (68 tests, no network) after any change.
+Run `python -m pytest tests -q` (130 tests, no network) after any change.
 
 ---
 
@@ -295,6 +349,9 @@ Full list in `.env.example`. The ones that change behaviour most:
 | `ARCUS_VENUE` | `arcus` | `sim` = offline paper exchange |
 | `BOT_MARKETS` | `BTC-USD,ETH-USD` | markets to quote |
 | `BOT_ORDER_NOTIONAL_USD` | `25` | per-clip size (min $5 engine floor) |
+| `BOT_CAPITAL_USD` / `_PCT` | `0` | budget to deploy; enables derived sizing |
+| `BOT_RESERVE_USD` | `0` | equity never touched; also the collateral floor |
+| `BOT_CAPITAL_UTILISATION` | `0.5` | share of available leverage deployed |
 | `BOT_SPREAD_BPS` | `10` | target round-trip edge |
 | `BOT_FEE_BUFFER_BPS` | `1` | margin required over fees |
 | `BOT_VOL_EDGE_MULTIPLIER` | `1.5` | spread widening per bps of realised vol |
@@ -351,4 +408,5 @@ normal and free), `ipBudget.tokens` not pinned at 0.
 - Channels: <https://docs.arcus.xyz/api-reference/channels>
 - Fund testnet: <https://docs.arcus.xyz/guides/fund-testnet-account>
 - In-repo: `README.md` (setup), `docs/BOT_OPERATIONS.md` (runbook),
-  `docs/ARCUS_PLATFORM.md` (venue reference), `docs/STRATEGY.md` (the economics).
+  `docs/ARCUS_PLATFORM.md` (venue reference), `docs/STRATEGY.md` (the economics),
+  `docs/CAPITAL.md` (budget -> sizing), `.env.example` (every config key).

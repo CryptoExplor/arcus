@@ -31,6 +31,14 @@ python3 -m venv .venv
 cp .env.example .env          # then fill in credentials
 ```
 
+`.env` holds secrets and is gitignored; `.env.example` is the shareable
+template with the same keys. Values may carry inline `# comments`, and real
+environment variables always override the file — `BOT_SPREAD_BPS=12 python -m
+arcusbot run` works as expected.
+
+New to Arcus? Signing up through <https://testnet.arcus.xyz/ref/AAAA>
+(mainnet: <https://app.arcus.xyz/ref/AIAGENT>) credits this tool.
+
 ### Credentials
 
 Easiest: <https://testnet.arcus.xyz/api-keys> — connect your wallet, generate,
@@ -124,6 +132,35 @@ inventory risk, not just volume.
 | `BOT_QUOTE_LEVELS` | `1` | ladder depth per side |
 | `BOT_LEVEL_STEP_BPS` | `4` | spacing between ladder levels |
 | `BOT_LEVERAGE` | `3` | set per market at startup |
+
+### Capital management
+Set a budget and let the bot derive every sizing knob from it — full detail in
+[`CAPITAL.md`](CAPITAL.md).
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `BOT_CAPITAL_USD` | `0` | absolute budget; `0` = fixed sizing |
+| `BOT_CAPITAL_PCT` | `0` | budget as % of equity; lower of the two wins |
+| `BOT_RESERVE_USD` | `0` | equity never touched; also the collateral floor |
+| `BOT_CAPITAL_UTILISATION` | `0.5` | share of available leverage deployed |
+| `BOT_CAPITAL_CLIPS` | `3` | clips per market inside the position cap |
+| `BOT_CAPITAL_INVENTORY_FRACTION` | `0.5` | soft cap ÷ hard cap |
+| `BOT_CAPITAL_RESIZE_PCT` | `20` | equity drift before re-sizing (`0` = never) |
+| `RISK_MAX_DRAWDOWN_PCT` | `0` | loss limit as % of deployed capital |
+
+```bash
+python -m arcusbot preflight --capital-pct 30 --reserve 150   # preview the plan
+```
+
+### Referral
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `ARCUS_REFERRAL_TESTNET` | `AAAA` | code for `testnet.arcus.xyz/ref/<code>` |
+| `ARCUS_REFERRAL_MAINNET` | `AIAGENT` | code for `app.arcus.xyz/ref/<code>` |
+| `BOT_SHOW_REFERRAL` | `true` | `false` hides the banner everywhere |
+
+Referral attribution happens at **signup**, in a browser — it never touches an
+order. Replace the codes with your own if you fork this repo.
 
 ### Edge and quoting
 | Variable | Default | Notes |
@@ -227,11 +264,38 @@ cancel-all → reduce-only IOC flatten. Or cancel from the web app.
 
 ---
 
+## 6b. The $1B VIP milestone
+
+Both networks advertise "Trade $1B volume to unlock VIP". The bot tracks
+progress and, more usefully, prints the honest arithmetic every run:
+
+```
+VIP progress: $234.28 of $1000000000 (0.000023%) — 1079.5 days at the current
+rate, costing ~$694297.25 in net PnL
+```
+
+Read that second clause carefully. At a negative edge, $1B of volume has a
+price tag in the hundreds of thousands of dollars. The milestone is only
+rational to chase once `netBpsOfVolume` is **positive** — then the same line
+reads "earning" instead of "costing", and volume becomes the goal rather than
+the cost.
+
+Practical implications:
+- Get the edge positive **first**. Volume at a negative edge just buys a badge.
+- The ETA scales with clip size, not with quoting faster. Raising
+  `BOT_ORDER_NOTIONAL_USD` (or the capital budget) moves it; shaving
+  `BOT_REQUOTE_INTERVAL_S` mostly burns rate limit.
+- Fee tiers improve with 30-day volume, so the edge tends to widen as you go —
+  at high tiers maker fees can turn into rebates.
+
+Live values are in `GET /api/status` under `vip`, and on the dashboard.
+
 ## 7. Tuning for more volume without losing money
 
 In order of preference:
 
-1. **Raise `BOT_ORDER_NOTIONAL_USD`.** Linear volume, unchanged edge per unit.
+1. **Raise `BOT_ORDER_NOTIONAL_USD`** (or the capital budget). Linear volume,
+   unchanged edge per unit.
 2. **Add markets.** Independent inventory; raise `RISK_MAX_OPEN_ORDERS` too.
 3. **Lower `BOT_REQUOTE_INTERVAL_S`.** More fills, more rate-limit pressure.
 4. **Raise `BOT_QUOTE_LEVELS`.** Ladder depth catches more sweeps.

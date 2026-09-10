@@ -22,10 +22,12 @@ import time
 from decimal import Decimal
 from typing import Any
 
+from .capital import plan_capital
 from .config import Config
 from .dashboard import start_dashboard
 from .engine import Engine
 from .pnl import FeeSchedule
+from .referral import all_referral_links, banner
 from .rest import ArcusError, ArcusREST
 from .scaling import dec_str
 from .signing import Signer
@@ -54,7 +56,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mode", choices=["dry-run", "live"], help="dry-run signs nothing, live sends orders")
     p.add_argument("--strategy", choices=["volume-maker", "ping-pong", "spot-rfq"])
     p.add_argument("--markets", help="comma-separated market list, e.g. BTC-USD,ETH-USD")
-    p.add_argument("--notional", type=str, help="per-order notional in USD")
+    p.add_argument("--notional", type=str, help="per-order notional in USD (fixed sizing)")
+    p.add_argument("--capital", type=str, metavar="USD",
+                   help="budget to deploy in USD — derives clip and position caps from it")
+    p.add_argument("--capital-pct", type=str, metavar="PCT",
+                   help="deploy this %% of account equity instead of a fixed amount")
+    p.add_argument("--reserve", type=str, metavar="USD",
+                   help="equity the bot must never touch")
+    p.add_argument("--leverage", type=int, help="leverage to set per market")
     p.add_argument("--spread-bps", type=str, help="target maker spread in bps")
     p.add_argument("--duration", type=int, help="max runtime in seconds (0 = unlimited)")
     p.add_argument("--volume-target", type=str, help="stop after this much USD volume")
@@ -80,6 +89,14 @@ def config_from_args(args: argparse.Namespace) -> Config:
         overrides["markets"] = [m.strip() for m in args.markets.split(",") if m.strip()]
     if args.notional:
         overrides["order_notional_usd"] = Decimal(args.notional)
+    if args.capital:
+        overrides["capital_usd"] = Decimal(args.capital)
+    if args.capital_pct:
+        overrides["capital_pct"] = Decimal(args.capital_pct)
+    if args.reserve:
+        overrides["reserve_usd"] = Decimal(args.reserve)
+    if args.leverage is not None:
+        overrides["leverage"] = args.leverage
     if args.spread_bps:
         overrides["spread_bps"] = Decimal(args.spread_bps)
     if args.duration is not None:
@@ -108,11 +125,13 @@ def cmd_preflight(cfg: Config, as_json: bool) -> int:
 
     problems = cfg.validate()
     check("config", not problems, "; ".join(problems) or "valid")
+    equity_seen: Decimal | None = None
 
     if cfg.venue == "sim":
         check("venue", True, "offline simulator — no network required", fatal=False)
         fees = FeeSchedule.from_fee_tiers(SIM_FEE_TIERS)
         check("fees", True, f"sim tier {fees.level}: {fees.maker_bps}/{fees.taker_bps} bps", fatal=False)
+        equity_seen = Decimal("1000")   # the simulator's starting balance
     else:
         signer = Signer(cfg.api_secret) if cfg.api_secret else None
         rest = ArcusREST(cfg, signer)
@@ -155,6 +174,7 @@ def cmd_preflight(cfg: Config, as_json: bool) -> int:
                     account = rest.account()
                     equity = Decimal(str(account.get("equity", account.get("accountEquity", 0))))
                     free = Decimal(str(account.get("freeCollateral", 0)))
+                    equity_seen = equity
                     enough = free >= cfg.min_free_collateral_usd
                     check("balance", enough,
                           f"equity ${dec_str(equity)} free ${dec_str(free)} "
@@ -179,9 +199,27 @@ def cmd_preflight(cfg: Config, as_json: bool) -> int:
             check("apiKey", cfg.mode != "live",
                   "no ARCUS_API_SECRET set (fine for dry-run, required for live)")
 
+    # Sizing plan — the operator should see the money at risk before going live.
+    alloc = plan_capital(cfg, equity_seen, len(cfg.markets))
+    check("sizing", alloc.sufficient, alloc.describe(), fatal=alloc.mode == "capital")
+    for note in alloc.notes:
+        check("sizing:note", True, note, fatal=False)
+    if alloc.mode == "capital" and equity_seen is not None:
+        at_risk = alloc.max_drawdown_usd
+        check("lossLimit", True,
+              f"kill switch at ${dec_str(at_risk)} drawdown "
+              f"({dec_str((at_risk / equity_seen * 100).quantize(Decimal('0.01')))}% of equity); "
+              f"reserve ${dec_str(alloc.reserve_usd)} untouchable",
+              fatal=False)
+
     fatal = [c for c in checks if not c["ok"] and c["fatal"]]
     if as_json:
-        print(json.dumps({"ok": not fatal, "checks": checks}, indent=2))
+        print(json.dumps({
+            "ok": not fatal,
+            "checks": checks,
+            "capital": alloc.as_dict(),
+            "referral": all_referral_links(cfg),
+        }, indent=2))
     else:
         print(f"\nPreflight — venue={cfg.venue} network={cfg.network} mode={cfg.mode}\n" + "-" * 72)
         for c in checks:
@@ -189,6 +227,9 @@ def cmd_preflight(cfg: Config, as_json: bool) -> int:
             print(f"  [{mark}] {c['check']:<16} {c['detail']}")
         print("-" * 72)
         print("READY" if not fatal else f"NOT READY — {len(fatal)} blocking issue(s)")
+        banner_text = banner(cfg)
+        if banner_text:
+            print(banner_text)
     return 0 if not fatal else 1
 
 

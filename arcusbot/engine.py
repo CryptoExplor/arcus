@@ -30,8 +30,10 @@ from pathlib import Path
 from typing import Any
 
 from .book import BookState, MarketState
+from .capital import Allocation, apply_allocation, needs_resize, plan_capital
 from .config import Config
 from .pnl import FeeSchedule, Fill, PnLTracker, fills_from_ws
+from .referral import all_referral_links, banner, vip_progress
 from .rest import ArcusError, ArcusREST
 from .risk import FLATTEN, HALT, OK, RiskManager
 from .scaling import D, dec_str
@@ -65,6 +67,8 @@ class Engine:
         self.dry_run_log: list[str] = []
         self.last_report = 0.0
         self.exit_reason = "not-started"
+        self.allocation: Allocation | None = None
+        self.resizes = 0
 
     # ------------------------------------------------------------ bootstrap --
     def _load_markets(self) -> dict[str, dict[str, Any]]:
@@ -126,6 +130,12 @@ class Engine:
 
         if self.cfg.venue == "arcus":
             await self._setup_live()
+        elif self.sim is not None:
+            # The simulator knows its own starting equity, so capital sizing
+            # can be exercised offline exactly as it would be live.
+            self.risk.note_account(self.sim.account())
+
+        self._resize_capital(initial=True)
 
         log.info("engine ready: venue=%s mode=%s strategy=%s markets=%s",
                  self.cfg.venue, self.cfg.mode, self.cfg.strategy, ",".join(wanted))
@@ -169,6 +179,42 @@ class Engine:
         await self.ws.start()
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self.ws.connected.wait(), timeout=15)
+
+    # --------------------------------------------------- capital allocation --
+    def _resize_capital(self, initial: bool = False) -> None:
+        """Derive sizing from the account balance (capital mode only).
+
+        Called once at startup and again whenever equity has drifted past
+        ``BOT_CAPITAL_RESIZE_PCT``, so the bot scales with the account instead
+        of trading a stale notional. In fixed mode this is a cheap no-op.
+        """
+        equity = self.risk.equity
+        alloc = plan_capital(self.cfg, equity, len(self.workers) or len(self.cfg.markets))
+
+        if initial:
+            self.allocation = alloc
+            apply_allocation(self.cfg, alloc)
+            log.info("%s", alloc.describe())
+            for note in alloc.notes:
+                # Only the note that blocks trading deserves a warning; the
+                # rest are explanations of a working plan.
+                (log.warning if not alloc.sufficient else log.info)("capital: %s", note)
+            if not alloc.sufficient:
+                # Refuse loudly rather than quietly trading a size the venue
+                # will reject on every single order.
+                self.risk.halt(
+                    "insufficient capital: " + (alloc.notes[-1] if alloc.notes else "budget too small")
+                )
+            return
+
+        if not needs_resize(self.allocation, equity, self.cfg.capital_resize_pct):
+            return
+
+        self.allocation = alloc
+        apply_allocation(self.cfg, alloc)
+        self.resizes += 1
+        log.info("capital re-sized (equity moved past %s%%): %s",
+                 dec_str(self.cfg.capital_resize_pct), alloc.describe())
 
     # -------------------------------------------------------- ws ingestion --
     def _on_ws(self, channel: str, sub_id: str, contents: dict[str, Any]) -> None:
@@ -440,6 +486,7 @@ class Engine:
         for st in self.states.values():
             st.observe_vol()
         self.pnl.set_marks({name: st.reference_price for name, st in self.states.items()})
+        self._resize_capital()
         verdict = self.risk.evaluate()
 
         if verdict.halted:
@@ -537,9 +584,15 @@ class Engine:
         if self.cfg.print_summary:
             print("\n" + "=" * 72)
             print(self.pnl.text_report())
+            if self.allocation is not None and self.allocation.mode == "capital":
+                print(self.allocation.describe())
+            print(vip_progress(self.pnl.snapshot()).describe())
             print(f"exit reason : {self.exit_reason}")
             print(f"report      : {report}")
             print("=" * 72)
+            banner_text = banner(self.cfg)
+            if banner_text:
+                print(banner_text)
 
     async def _cancel_everything(self) -> None:
         if self.cfg.venue == "sim":
@@ -598,6 +651,7 @@ class Engine:
 
     # -------------------------------------------------------------- status --
     def status(self) -> dict[str, Any]:
+        pnl_snapshot = self.pnl.snapshot()
         return {
             "version": "1.0.0",
             "venue": self.cfg.venue,
@@ -611,7 +665,11 @@ class Engine:
             "rejects": self.rejects,
             "exitReason": self.exit_reason if self.stopping.is_set() else None,
             "risk": self.risk.snapshot(),
-            "pnl": self.pnl.snapshot(),
+            "pnl": pnl_snapshot,
+            "capital": self.allocation.as_dict() if self.allocation else None,
+            "capitalResizes": self.resizes,
+            "vip": vip_progress(pnl_snapshot).as_dict(),
+            "referral": all_referral_links(self.cfg) if self.cfg.show_referral else {},
             "markets": [w.snapshot() for w in self.workers.values()],
             "ws": self.ws.health() if self.ws else None,
             "ipBudget": self.rest.budget.snapshot(),

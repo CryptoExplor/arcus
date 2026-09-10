@@ -13,6 +13,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+# referral.py deliberately does not import config (it takes the config object as
+# a parameter), so this direction is safe.
+from .referral import DEFAULT_REFERRAL_MAINNET, DEFAULT_REFERRAL_TESTNET
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 TESTNET_REST = "https://api.testnet.arcus.xyz"
@@ -28,18 +32,44 @@ USDG_TESTNET = "0x293b337712d4312776a3a2d292f44410e7873bad"
 DEPOSIT_PROXY_TESTNET = "0xb872366eef371d4afb7c6d4d2abd53c17292a34d"
 
 
+def _strip_inline_comment(value: str) -> str:
+    """Drop a trailing ``# comment`` from an unquoted .env value.
+
+    Only whitespace-preceded ``#`` starts a comment, so values that legitimately
+    contain a hash (``pass#word``) survive. Quoted values are returned verbatim
+    by the caller and never reach this function.
+    """
+    out: list[str] = []
+    for i, ch in enumerate(value):
+        if ch == "#" and (i == 0 or value[i - 1].isspace()):
+            break
+        out.append(ch)
+    return "".join(out).strip()
+
+
 def load_dotenv(path: str | Path = REPO_ROOT / ".env") -> None:
-    """Minimal .env loader (no dependency on python-dotenv)."""
+    """Minimal .env loader (no dependency on python-dotenv).
+
+    Supports ``KEY=value``, ``export KEY=value``, quoted values, blank lines,
+    full-line comments and trailing inline comments. Existing environment
+    variables always win, so ``FOO=1 python -m arcusbot`` overrides the file.
+    """
     p = Path(path)
     if not p.is_file():
         return
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        key = key.strip().removeprefix("export ").strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]          # quoted: take it literally
+        else:
+            value = _strip_inline_comment(value)
         os.environ.setdefault(key, value)
 
 
@@ -99,6 +129,23 @@ class Config:
     leverage: int = 3
     quote_levels: int = 1             # ladder depth per side
     level_step_bps: Decimal = Decimal("4")
+
+    # -------------------------------------------------- capital management --
+    # Set capital_usd or capital_pct to derive every sizing knob from your
+    # balance instead of hard-coding notionals. See arcusbot/capital.py.
+    capital_usd: Decimal = Decimal("0")          # absolute budget (0 = off)
+    capital_pct: Decimal = Decimal("0")          # % of equity to deploy (0 = off)
+    reserve_usd: Decimal = Decimal("0")          # never touch this much equity
+    capital_utilisation: Decimal = Decimal("0.5")   # share of available leverage used
+    capital_clips: int = 3                       # clips per market inside the cap
+    capital_inventory_fraction: Decimal = Decimal("0.5")  # soft cap / hard cap
+    capital_resize_pct: Decimal = Decimal("20")  # equity drift before re-sizing
+    max_drawdown_pct: Decimal = Decimal("0")     # drawdown limit as % of capital
+
+    # ------------------------------------------------------------ referral --
+    referral_testnet: str = DEFAULT_REFERRAL_TESTNET
+    referral_mainnet: str = DEFAULT_REFERRAL_MAINNET
+    show_referral: bool = True
 
     # ------------------------------------------------------------- quoting --
     spread_bps: Decimal = Decimal("10")      # target round-trip edge (maker); see docs/STRATEGY.md
@@ -207,6 +254,17 @@ class Config:
             leverage=_int("BOT_LEVERAGE", 3),
             quote_levels=_int("BOT_QUOTE_LEVELS", 1),
             level_step_bps=_dec("BOT_LEVEL_STEP_BPS", "4"),
+            capital_usd=_dec("BOT_CAPITAL_USD", "0"),
+            capital_pct=_dec("BOT_CAPITAL_PCT", "0"),
+            reserve_usd=_dec("BOT_RESERVE_USD", "0"),
+            capital_utilisation=_dec("BOT_CAPITAL_UTILISATION", "0.5"),
+            capital_clips=_int("BOT_CAPITAL_CLIPS", 3),
+            capital_inventory_fraction=_dec("BOT_CAPITAL_INVENTORY_FRACTION", "0.5"),
+            capital_resize_pct=_dec("BOT_CAPITAL_RESIZE_PCT", "20"),
+            max_drawdown_pct=_dec("RISK_MAX_DRAWDOWN_PCT", "0"),
+            referral_testnet=str(_env("ARCUS_REFERRAL_TESTNET", DEFAULT_REFERRAL_TESTNET)),
+            referral_mainnet=str(_env("ARCUS_REFERRAL_MAINNET", DEFAULT_REFERRAL_MAINNET)),
+            show_referral=_bool("BOT_SHOW_REFERRAL", True),
             spread_bps=_dec("BOT_SPREAD_BPS", "10"),
             min_edge_bps=_dec("BOT_MIN_EDGE_BPS", "0"),
             join_bbo=_bool("BOT_JOIN_BBO", True),
@@ -266,10 +324,37 @@ class Config:
                 problems.append("ARCUS_ADDRESS must be a 0x-prefixed 42-char address")
             if len(self.api_secret.removeprefix("0x")) != 64:
                 problems.append("ARCUS_API_SECRET must be 64 hex chars (32-byte Ed25519 key)")
-        if self.order_notional_usd < Decimal("5"):
-            problems.append("BOT_ORDER_NOTIONAL_USD must be >= 5 (engine min order notional)")
-        if self.max_position_notional_usd < self.order_notional_usd:
-            problems.append("BOT_MAX_POSITION_NOTIONAL_USD must be >= BOT_ORDER_NOTIONAL_USD")
+        capital_mode = self.capital_usd > 0 or self.capital_pct > 0
+        if not capital_mode:
+            # In capital mode these are derived at runtime from equity, so only
+            # validate them when the operator is setting them by hand.
+            if self.order_notional_usd < Decimal("5"):
+                problems.append("BOT_ORDER_NOTIONAL_USD must be >= 5 (engine min order notional)")
+            if self.max_position_notional_usd < self.order_notional_usd:
+                problems.append("BOT_MAX_POSITION_NOTIONAL_USD must be >= BOT_ORDER_NOTIONAL_USD")
+
+        if self.capital_pct < 0 or self.capital_pct > 100:
+            problems.append(f"BOT_CAPITAL_PCT must be between 0 and 100, got {self.capital_pct}")
+        if self.capital_usd < 0:
+            problems.append("BOT_CAPITAL_USD cannot be negative")
+        if self.reserve_usd < 0:
+            problems.append("BOT_RESERVE_USD cannot be negative")
+        if not (Decimal(0) < self.capital_utilisation <= Decimal(1)):
+            problems.append(
+                f"BOT_CAPITAL_UTILISATION must be in (0, 1], got {self.capital_utilisation}. "
+                "It is the share of available leverage the bot deploys; 1.0 means "
+                "running at full margin, which risks liquidation."
+            )
+        if self.capital_clips < 1:
+            problems.append("BOT_CAPITAL_CLIPS must be >= 1")
+        if not (Decimal(0) < self.capital_inventory_fraction <= Decimal(1)):
+            problems.append(
+                f"BOT_CAPITAL_INVENTORY_FRACTION must be in (0, 1], "
+                f"got {self.capital_inventory_fraction}"
+            )
+        if self.max_drawdown_pct < 0 or self.max_drawdown_pct > 100:
+            problems.append("RISK_MAX_DRAWDOWN_PCT must be between 0 and 100")
+
         if self.flatten_tif not in {"IOC", "FOK", "GTT", "ALO"}:
             problems.append(f"BOT_FLATTEN_TIF must be IOC/FOK/GTT/ALO, got {self.flatten_tif!r}")
         if self.network == "mainnet" and self.mode == "live":

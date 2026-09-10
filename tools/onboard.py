@@ -25,7 +25,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from arcusbot.config import MAINNET_REST, TESTNET_REST  # noqa: E402
+from arcusbot.config import MAINNET_REST, TESTNET_REST, Config  # noqa: E402
+from arcusbot.referral import referral_link  # noqa: E402
 from arcusbot.signing import canonical_json  # noqa: E402
 
 
@@ -63,6 +64,13 @@ def main() -> int:
 
     base = TESTNET_REST if args.network == "testnet" else MAINNET_REST
     wallet = Account.from_key(args.private_key)
+
+    # Registration binds the key to an address that must already exist on the
+    # exchange. If this is a brand-new wallet, signing up through a referral
+    # link first is the moment attribution happens.
+    link = referral_link(Config.from_env(network=args.network))
+    if link:
+        print(f"new to Arcus? sign up first: {link}\n")
 
     priv = ed25519.Ed25519PrivateKey.generate()
     secret_hex = priv.private_bytes_raw().hex()
