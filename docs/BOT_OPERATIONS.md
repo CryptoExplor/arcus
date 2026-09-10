@@ -490,10 +490,14 @@ cap and logs every change:
 
 | Limit | Fraction of cap | On a $20 cap |
 | --- | --- | --- |
-| `max_drawdown_usd` | 15% | $3.00 |
-| `max_daily_loss_usd` | 20% | $4.00 |
-| `max_position_notional_usd` | 150% | $30.00 |
-| `max_inventory_notional_usd` | 100% | $20.00 |
+| `max_drawdown_usd` | 5% | **$1.00** |
+| `max_daily_loss_usd` | 10% | **$2.00** |
+| `max_position_notional_usd` | 75% | **$15.00** |
+| `max_inventory_notional_usd` | 75% | **$15.00** |
+
+Position notional is capped *at or below* equity on purpose. See
+[`docs/CAPITAL.md`](CAPITAL.md) — "Five different numbers people call my risk" —
+for why a $30 notional position on a $20 account is not a $10 risk.
 
 This matters: the testnet default drawdown is `$25`, which on a $20 account
 would allow losing more than the entire balance before halting. A limit you set
@@ -538,8 +542,8 @@ Startup logs you should see, and must read:
 
 ```
 MAINNET LIVE — real funds. Hard capital cap $20.
-mainnet risk floor: max_drawdown_usd $25 -> $3
-mainnet risk floor: max_daily_loss_usd $40 -> $4
+mainnet risk floor: max_drawdown_usd $25 -> $1
+mainnet risk floor: max_daily_loss_usd $40 -> $2
 ```
 
 If you do not see those lines, you are not on the gated path — stop.

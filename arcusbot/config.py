@@ -147,6 +147,12 @@ class Config:
     referral_mainnet: str = DEFAULT_REFERRAL_MAINNET
     show_referral: bool = True
 
+    # ------------------------------------------------------------- evidence --
+    # Free-text tags recorded with each session so results can be grouped by
+    # market regime when the evidence is analysed.
+    session_regime: str = ""
+    session_label: str = ""
+
     # -------------------------------------------------------------- mainnet --
     # Live mainnet execution requires ALL of these; see arcusbot/mainnet.py.
     mainnet_enabled: bool = False
@@ -278,6 +284,8 @@ class Config:
             referral_testnet=str(_env("ARCUS_REFERRAL_TESTNET", DEFAULT_REFERRAL_TESTNET)),
             referral_mainnet=str(_env("ARCUS_REFERRAL_MAINNET", DEFAULT_REFERRAL_MAINNET)),
             show_referral=_bool("BOT_SHOW_REFERRAL", True),
+            session_regime=str(_env("BOT_SESSION_REGIME", "")),
+            session_label=str(_env("BOT_SESSION_LABEL", "")),
             mainnet_enabled=_bool("BOT_MAINNET_ENABLED", False),
             mainnet_capital_usd=_dec("BOT_MAINNET_CAPITAL_USD", "0"),
             mainnet_ack=str(_env("BOT_MAINNET_ACK", "")),

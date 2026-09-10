@@ -146,10 +146,30 @@ def test_config_validate_surfaces_the_gate_reasons() -> None:
 
 
 def test_risk_floor_scales_with_the_cap_not_the_default_config() -> None:
+    """First-experiment limits: bound the LOSS, not just the deposit."""
     floor = mainnet_risk_floor(Decimal("20"))
-    assert floor["max_drawdown_usd"] == Decimal("3.00")
-    assert floor["max_daily_loss_usd"] == Decimal("4.00")
-    assert floor["max_position_notional_usd"] == Decimal("30.00")
+    assert floor["max_drawdown_usd"] == Decimal("1.00")
+    assert floor["max_daily_loss_usd"] == Decimal("2.00")
+    assert floor["max_position_notional_usd"] == Decimal("15.00")
+    assert floor["max_inventory_notional_usd"] == Decimal("15.00")
+
+
+def test_position_notional_never_exceeds_the_capital_cap() -> None:
+    """Guards the "$20 account with a $30 position" ambiguity.
+
+    Notional above equity is only safe if you reason about leverage and
+    liquidation. For a first experiment we simply refuse to go there.
+    """
+    for cap in ("20", "50", "100"):
+        floor = mainnet_risk_floor(Decimal(cap))
+        assert floor["max_position_notional_usd"] <= Decimal(cap)
+        assert floor["max_inventory_notional_usd"] <= Decimal(cap)
+
+
+def test_loss_limits_are_a_small_fraction_of_capital() -> None:
+    floor = mainnet_risk_floor(Decimal("20"))
+    assert floor["max_drawdown_usd"] <= Decimal("20") * Decimal("0.05")
+    assert floor["max_daily_loss_usd"] <= Decimal("20") * Decimal("0.10")
 
 
 def test_apply_mainnet_limits_only_tightens() -> None:
@@ -158,8 +178,8 @@ def test_apply_mainnet_limits_only_tightens() -> None:
                    max_position_notional_usd=Decimal("150"),
                    max_inventory_notional_usd=Decimal("75"))
     changes = apply_mainnet_limits(cfg, Decimal("20"))
-    assert cfg.max_drawdown_usd == Decimal("3.00")
-    assert cfg.max_daily_loss_usd == Decimal("4.00")
+    assert cfg.max_drawdown_usd == Decimal("1.00")
+    assert cfg.max_daily_loss_usd == Decimal("2.00")
     assert changes, "tightening must be reported to the operator"
 
 

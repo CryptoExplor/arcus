@@ -30,10 +30,17 @@ before changing X".
 | which markets are traded | `arcusbot/selection.py` |
 | how the bot reacts to conditions | `arcusbot/adaptive.py` |
 | restart behaviour | `arcusbot/session.py`, `docs/PERSISTENCE.md` |
+| claiming the strategy works | `arcusbot/evidence.py`, `docs/VALIDATION.md` — read BEFORE reporting any result |
 | credentials / multiple wallets | `arcusbot/wallets.py`, `docs/BOT_OPERATIONS.md` (credentials) |
 
 Then run `python -m pytest tests -q` (256 tests, no network, <1s). If you cannot
 explain which test would have caught your bug, you have not finished.
+
+**Status: the strategy has NO demonstrated edge.** No live Arcus testnet run has
+happened (the build sandbox cannot reach the API). Every number in this repo is
+from the offline simulator. Do not describe the bot as profitable, and do not
+move to mainnet, until `python -m arcusbot evidence` reports `POSITIVE-EDGE`
+from real testnet fills. See `docs/VALIDATION.md`.
 
 **The three rules that override everything else:**
 
@@ -105,6 +112,7 @@ at <https://testnet.arcus.xyz/api-keys>, or scripted via `tools/onboard.py`.
 | `markets` | read-only | no | Tick/step/notional grid per market |
 | `markets --rank` | read-only | no | Score/veto markets for the capital you have |
 | `wallets` | no | no | List named wallet profiles from `.env` (secrets redacted) |
+| `evidence` | no | no | Aggregate recorded sessions; exit 0 only if the data supports mainnet |
 | `quote` | read-only | no | Print the exact intents the strategy would emit now |
 | `run --mode dry-run` | read-only | no | Full loop, logs intents instead of signing |
 | `run --mode live` | yes | **yes** | Real signed orders |
@@ -263,6 +271,7 @@ config.py      typed config from env/.env + validate()  <- consults the mainnet 
 mainnet.py     fail-closed mainnet gate: conjunctive opt-in + hard capital cap
 selection.py   market ranking/veto: which markets this account can actually trade
 wallets.py     named wallet profiles (--wallet t1) + wallet-private-key guards
+evidence.py    per-session metrics + statistical verdict on whether an edge exists
 adaptive.py    per-market feedback control (edge + frequency multipliers)
 capital.py     budget -> clip/position/loss limits, reserves, mid-run re-sizing
 referral.py    referral links + $1B VIP milestone arithmetic
@@ -451,7 +460,13 @@ Shutdown is always `cancel-all -> flatten (reduce-only IOC, retried) -> report`.
 15. **The adaptive layer may widen the edge and slow the loop freely, but may
     only speed up when demonstrably profitable** with benign flow, a healthy API
     and no inventory pressure. It can never price below the fee floor.
-16. **Shutdown confirms rather than assumes.** After cancel + flatten the engine
+16. **Unrealized PnL is not profit.** A session is successful only when
+    `realized + unrealized + funding + rebates - fees > 0` AND the
+    realized-only figure is also positive. `evidence.py` flags the difference
+    as `unrealizedDependent`; never report such a session as a win.
+17. **No edge claim below 5 sessions / 400 fills / t >= 2.0.** Enforced by
+    `Aggregate.credible_positive_edge`. Tests: `test_evidence.py`.
+18. **Shutdown confirms rather than assumes.** After cancel + flatten the engine
     re-reads account state and reports any residual position instead of exiting
     quietly. (`engine._confirm_flat`)
 

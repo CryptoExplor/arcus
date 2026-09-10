@@ -204,11 +204,26 @@ def assert_capital_within_cap(deployable: Decimal, cap: Decimal | None) -> str |
 
 #: Risk limits as a fraction of the mainnet capital cap. A $20 account cannot
 #: meaningfully use a $25 drawdown limit; these make the defaults proportional.
+# Proportional limits for a first mainnet experiment.
+#
+# These are deliberately tighter than the general testnet defaults, and tighter
+# than a leverage-aware maximum would allow. The distinction that matters:
+#
+#   account equity      what you deposited            e.g. $20
+#   margin allocated    equity backing open positions  <= $20
+#   position notional   size of the position itself    can EXCEED equity with leverage
+#   maximum loss        what an adverse move can cost  bounded by the stops below
+#
+# A $30 notional position is not a $30 risk, but neither is it a $10 risk: at
+# 3x leverage a 10% adverse move on $30 notional is $3, i.e. 15% of a $20
+# account. Capping notional at 0.75x the budget keeps the *loss* small rather
+# than merely keeping the deposit small, and the drawdown/daily-loss stops are
+# the real backstop.
 MAINNET_RISK_FRACTIONS = {
-    "max_drawdown_usd": Decimal("0.15"),          # 15% of budget
-    "max_daily_loss_usd": Decimal("0.20"),        # 20% of budget
-    "max_position_notional_usd": Decimal("1.5"),  # 1.5x budget (leverage aware)
-    "max_inventory_notional_usd": Decimal("1.0"),
+    "max_drawdown_usd": Decimal("0.05"),           # $1 on a $20 budget
+    "max_daily_loss_usd": Decimal("0.10"),         # $2 on a $20 budget
+    "max_position_notional_usd": Decimal("0.75"),  # $15 notional, NOT leveraged up
+    "max_inventory_notional_usd": Decimal("0.75"),
 }
 
 

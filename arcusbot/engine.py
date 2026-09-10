@@ -86,6 +86,10 @@ class Engine:
         self.mainnet_cap: Decimal | None = None
         self.adaptive: dict[str, AdaptiveController] = {}
         self.last_fill_at = 0.0
+        self.max_inventory_usd = Decimal(0)
+        self.inventory_sum = Decimal(0)
+        self.inventory_samples = 0
+        self.max_inventory_age_s = 0.0
         self.final_state_confirmed = False
         self.residual_positions: dict[str, str] = {}
 
@@ -250,6 +254,20 @@ class Engine:
         await self.ws.start()
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self.ws.connected.wait(), timeout=15)
+
+    def _sample_inventory(self) -> None:
+        """Track average/peak inventory so exposure can be judged after the fact."""
+        total = Decimal(0)
+        for name, worker in self.workers.items():
+            mid = self.states[name].reference_price
+            if worker.position and mid:
+                total += abs(worker.position) * mid
+            if worker.inventory_since:
+                age = time.time() - worker.inventory_since
+                self.max_inventory_age_s = max(self.max_inventory_age_s, age)
+        self.inventory_sum += total
+        self.inventory_samples += 1
+        self.max_inventory_usd = max(self.max_inventory_usd, total)
 
     # ---------------------------------------------------- adaptive control --
     def _update_adaptive(self) -> None:
@@ -749,6 +767,7 @@ class Engine:
         for st in self.states.values():
             st.observe_vol()
         self._update_adaptive()
+        self._sample_inventory()
         self.pnl.set_marks({name: st.reference_price for name, st in self.states.items()})
         self._resize_capital()
         verdict = self.risk.evaluate()
@@ -870,6 +889,7 @@ class Engine:
         self.session.finish_session(self.pnl.session_id, snapshot, self.exit_reason)
 
         self.write_state()
+        self._record_evidence()
         report = self.pnl.write_report(self.cfg.state_dir / f"report-{self.pnl.session_id}.json")
         latest = self.cfg.state_dir / "report-latest.json"
         latest.write_text(report.read_text(encoding="utf-8"), encoding="utf-8")
@@ -1074,6 +1094,36 @@ class Engine:
             "spotIntents": self.spot_intents[-10:],
             "dryRunSample": self.dry_run_log[-10:],
         }
+
+    def _record_evidence(self) -> None:
+        """Append this session's raw numbers to the evidence log.
+
+        Never allowed to break shutdown: evidence is valuable, but not more
+        valuable than a clean exit and a final report.
+        """
+        try:
+            from .evidence import SessionEvidence, append_session
+            ev = SessionEvidence.from_status(self.status(),
+                                             regime=self.cfg.session_regime,
+                                             label=self.cfg.session_label)
+            ev.max_inventory_usd = self.max_inventory_usd
+            ev.avg_inventory_usd = (self.inventory_sum / self.inventory_samples
+                                    if self.inventory_samples else Decimal(0))
+            ev.max_inventory_age_s = self.max_inventory_age_s
+            ev.params = {
+                "spreadBps": dec_str(self.cfg.spread_bps),
+                "orderNotionalUsd": dec_str(self.cfg.order_notional_usd),
+                "maxPositionNotionalUsd": dec_str(self.cfg.max_position_notional_usd),
+                "maxInventoryNotionalUsd": dec_str(self.cfg.max_inventory_notional_usd),
+                "leverage": self.cfg.leverage,
+                "minEdgeBps": dec_str(self.cfg.min_edge_bps),
+                "requoteIntervalS": self.cfg.requote_interval_s,
+                "strategy": self.cfg.strategy,
+            }
+            append_session(self.cfg.state_dir / "evidence.jsonl", ev)
+            log.info("evidence recorded: %s", ev.describe().replace("\n", " | "))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not record session evidence: %s", exc)
 
     def write_state(self) -> Path:
         path = self.cfg.state_dir / "status.json"

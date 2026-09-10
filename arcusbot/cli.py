@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m arcusbot", description="Arcus testnet trading bot")
     p.add_argument("command",
                    choices=["run", "preflight", "markets", "quote", "report",
-                            "selftest", "sweep", "history", "wallets"])
+                            "selftest", "sweep", "history", "wallets", "evidence"])
     p.add_argument("--venue", choices=["arcus", "sim"], help="arcus (real API) or sim (offline)")
     p.add_argument("--wallet", metavar="NAME",
                    help="use a named wallet profile from .env "
@@ -78,6 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-drawdown", type=str, metavar="USD",
                    help="halt if net PnL falls this far below its peak "
                         "(only ever tightens the configured limit)")
+    p.add_argument("--regime", metavar="NAME",
+                   help="tag this session's evidence with a market regime "
+                        "(e.g. low-vol, high-vol, thin, wide-spread)")
     p.add_argument("--rank", action="store_true",
                    help="markets: score and rank markets for the current capital")
     p.add_argument("--port", type=int, help="dashboard port (0 disables)")
@@ -124,6 +127,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
         overrides["metrics_port"] = args.port
     if args.spot:
         overrides["enable_spot"] = True
+    if args.regime:
+        overrides["session_regime"] = args.regime
     if args.log_level:
         overrides["log_level"] = args.log_level.upper()
 
@@ -563,6 +568,19 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.command == "preflight":
         return cmd_preflight(cfg, args.json)
+    if args.command == "evidence":
+        from .evidence import aggregate, load_sessions
+        agg = aggregate(load_sessions(cfg.state_dir / "evidence.jsonl"))
+        if args.json:
+            print(json.dumps({"aggregate": agg.as_dict(),
+                              "sessions": [s.as_dict() for s in agg.sessions]}, indent=2))
+        else:
+            for s in agg.sessions:
+                print(s.describe())
+            print()
+            print(agg.report())
+        # Exit non-zero unless the evidence actually supports going further.
+        return 0 if agg.ready_for_mainnet() else 1
     if args.command == "wallets":
         from .wallets import format_table, load_all
         profiles = load_all()

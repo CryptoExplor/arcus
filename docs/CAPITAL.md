@@ -188,11 +188,36 @@ python -m arcusbot markets --rank --capital 20
 
 ---
 
+## Five different numbers people call "my risk"
+
+"I only have $20" is ambiguous, and the ambiguity is dangerous. These are
+distinct quantities:
+
+| Term | What it means | On a $20 mainnet budget |
+| --- | --- | --- |
+| **Account equity** | What you deposited. The most you can lose in total. | $20 |
+| **Margin allocated** | Equity backing open positions. Cannot exceed equity. | <= $20 |
+| **Position notional** | The face value of the position. **With leverage this can exceed equity.** | capped at **$15** |
+| **Liquidation exposure** | The adverse move that wipes the margin backing a position. | avoided by capping notional <= equity |
+| **Maximum loss** | What the risk engine will actually let you lose before halting. | **$1** drawdown / **$2** daily |
+
+The trap: at 3x leverage, a $30 notional position is backed by ~$10 of margin.
+A 10% adverse move costs $3 — 15% of a $20 account — even though "only $10 was
+allocated". Notional is not risk, but it is *proportional* to risk.
+
+This is why the mainnet floor caps position notional at **0.75x the budget**
+rather than a leverage-aware multiple: for a first experiment, keeping notional
+at or below equity means the drawdown stop does the work and liquidation is not
+a realistic path. The stops, not the deposit size, are the real protection.
+
+---
+
 ## The $20 mainnet case
 
 `BOT_MAINNET_CAPITAL_USD` is a **separate, harder** limit from `BOT_CAPITAL_USD`.
 It is enforced by the risk engine on every allocation and re-size, and it
-tightens the loss limits to fractions of itself (drawdown 15%, daily loss 20%).
+tightens the loss limits to fractions of itself (drawdown 5%, daily loss 10%,
+position and inventory notional 75%).
 See `docs/BOT_OPERATIONS.md` section 8. The general sizing knobs below still
 apply — the mainnet cap simply puts a ceiling under all of them that config
 cannot raise.

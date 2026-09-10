@@ -15,6 +15,13 @@ Python 3.11+, stdlib-only except `cryptography` and `websockets`.
 
 ---
 
+> ### Status: not validated
+> The strategy has **no demonstrated trading edge**. No live Arcus testnet
+> session has been run — the build environment cannot reach the API. All
+> results so far are from the offline simulator and the best of them
+> (**+0.82 bps ±2.06**) is statistically indistinguishable from zero.
+> Mainnet is **not** ready. See [`docs/VALIDATION.md`](docs/VALIDATION.md).
+
 ## New here? Start with this
 
 No API key, no wallet, no money, no internet needed — this runs against a
