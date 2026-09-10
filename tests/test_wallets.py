@@ -15,6 +15,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from decimal import Decimal  # noqa: E402
+
 from arcusbot.config import Config  # noqa: E402
 from arcusbot.wallets import (  # noqa: E402
     ALLOW_MAINNET_PK,
@@ -201,3 +203,70 @@ def test_address_is_shortened_for_display_but_kept_in_full_in_data() -> None:
     profile = load_profile("t1", ENV)
     assert profile.short_address() == "0x1111…1111"
     assert profile.as_dict()["address"] == T1_ADDR
+
+
+# ------------------------------------- trading needs NO wallet private key ---
+
+
+def test_two_accounts_trade_with_api_secrets_alone() -> None:
+    """The whole point: two API keys are sufficient to trade autonomously.
+
+    No ARCUS_PRIVATE_KEY is defined anywhere in this environment, yet both
+    profiles are fully usable and produce distinct, valid order signatures.
+    """
+    import time
+
+    from arcusbot.rest import ArcusREST
+    from arcusbot.signing import Signer
+    from arcusbot.sim import SIM_MARKETS
+
+    env = {k: v for k, v in ENV.items() if "PRIVATE_KEY" not in k}
+    assert not any("PRIVATE_KEY" in k for k in env)
+
+    signatures, api_keys = [], []
+    for name in ("t1", "t2"):
+        profile = load_profile(name, env)
+        assert profile.usable, f"{name} must be tradable without a wallet key"
+        assert not profile.has_private_key
+
+        cfg = Config(venue="arcus")
+        apply_to_config(cfg, profile)
+        signer = Signer(cfg.api_secret)          # only input: the API secret
+        rest = ArcusREST(cfg, signer)
+        rest._markets = dict(SIM_MARKETS)
+        rest._markets_by_id = {int(m["marketId"]): m for m in SIM_MARKETS.values()}
+        rest._markets_fetched = time.time()
+
+        ts = time.time_ns()
+        fields, _ = rest.build_order(
+            "BTC-USD", "BUY", Decimal("0.001"), Decimal("64000"),
+            tif="ALO", reduce_only=False, client_id="t", ts_ns=ts)
+        _, signature = signer.sign_typed(fields)
+        assert len(signature) == 128
+        signatures.append(signature)
+        api_keys.append(signer.api_key)
+
+    assert api_keys[0] != api_keys[1], "each account must sign as itself"
+    assert signatures[0] != signatures[1]
+
+
+def test_api_key_is_derived_from_the_secret_not_configured() -> None:
+    """Users only ever paste ARCUS_API_SECRET; the public key is computed."""
+    from arcusbot.signing import Signer
+
+    signer = Signer(T1_SEC)
+    assert len(signer.api_key) == 64
+    assert signer.api_key != T1_SEC, "the API key is the PUBLIC half"
+    assert Signer(T1_SEC).api_key == signer.api_key, "derivation is deterministic"
+
+
+def test_no_trading_module_reads_a_wallet_private_key() -> None:
+    """Structural guard: only wallets.py/cli.py may mention private keys."""
+    root = Path(__file__).resolve().parent.parent / "arcusbot"
+    offenders = []
+    for path in root.glob("*.py"):
+        if path.name in {"wallets.py", "cli.py", "signing.py"}:
+            continue
+        if "ARCUS_PRIVATE_KEY" in path.read_text(encoding="utf-8"):
+            offenders.append(path.name)
+    assert not offenders, f"trading modules must not read wallet keys: {offenders}"

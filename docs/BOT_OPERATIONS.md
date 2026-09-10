@@ -116,6 +116,40 @@ is safe.
 **Selecting a mainnet wallet does not bypass the mainnet gate** (section 8).
 You still need all five opt-ins; the profile only supplies the identity.
 
+### Do I need a private key to run the bot? No.
+
+**Two API keys are enough for two accounts to trade fully automatically.**
+Nothing else is required.
+
+The naming is genuinely confusing, so to be explicit — an Arcus API key is an
+**Ed25519 keypair**:
+
+| | What it is | Where it goes |
+| --- | --- | --- |
+| `ARCUS_API_SECRET` | the *private half* of the API keypair | you paste this into `.env` |
+| `X-API-Key` header | the *public half*, **computed** from the secret | derived automatically, never configured |
+
+So "API key" and "API secret" are two halves of one thing, and you only ever
+supply the secret. That secret **authorises trading only — it cannot withdraw
+funds.** It is not your wallet key and has no power over your coins beyond
+placing and cancelling orders.
+
+A minimal two-account setup, with no private key anywhere:
+
+```bash
+ARCUS_ADDRESS_T1=0x...   ARCUS_API_SECRET_T1=<64 hex>
+ARCUS_ADDRESS_T2=0x...   ARCUS_API_SECRET_T2=<64 hex>
+```
+
+```bash
+python -m arcusbot run --wallet t1 --mode live --duration 900
+python -m arcusbot run --wallet t2 --mode live --duration 900
+```
+
+That is the complete requirement. A wallet private key is needed **only** to
+*create* an API key in the first place (`tools/onboard.py`) — and even then you
+can create one in the web UI instead and never expose the wallet key at all.
+
 ### Wallet private keys — the dangerous kind
 
 `ARCUS_PRIVATE_KEY_<NAME>` is supported but **the bot never needs it to trade**.

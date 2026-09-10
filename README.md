@@ -133,6 +133,11 @@ The network follows the profile name (`t*` testnet, `m*` mainnet) and switches
 the API hosts with it. Selecting a mainnet wallet still does **not** bypass the
 mainnet gate.
 
+**No private key is needed to trade.** An API key is an Ed25519 keypair: you
+paste the *secret* half, and the `X-API-Key` header is computed from it. That
+secret authorises **trading only and cannot withdraw funds**. Two accounts = two
+`ARCUS_API_SECRET_*` values, nothing more.
+
 > **Wallet private keys** (`ARCUS_PRIVATE_KEY_*`) are optional and **not needed
 > to trade**. The API signing key authorises trading only; a wallet key can
 > withdraw your funds. If stored, it is never loaded during trading, a mainnet
