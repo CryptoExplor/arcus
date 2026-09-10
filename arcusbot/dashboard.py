@@ -53,7 +53,7 @@ footer a{color:var(--acc);text-decoration:none}
 footer a:hover{text-decoration:underline}
 </style></head><body>
 <header>
-  <h1>ARCUS TESTNET BOT</h1>
+  <h1>ARCUS BOT</h1>
   <span class="badge" id="venue">-</span>
   <span class="badge" id="mode">-</span>
   <span class="badge" id="strategy">-</span>
@@ -61,6 +61,11 @@ footer a:hover{text-decoration:underline}
   <span class="badge" id="uptime">-</span>
 </header>
 <main>
+  <div class="card" id="healthcard" style="grid-column:1/-1">
+    <h2>Status</h2>
+    <div class="big" id="health">-</div>
+    <div class="kv"><span id="healthdetail">-</span><span id="healthextra"></span></div>
+  </div>
   <div class="card"><h2>Net PnL (after fees)</h2>
     <div class="big" id="net">-</div>
     <div class="kv"><span>gross</span><span id="gross">-</span></div>
@@ -134,7 +139,17 @@ const cls=v=>Number(v)>0?'good':(Number(v)<0?'bad':'dim');
 async function tick(){
  try{
   const s=await (await fetch('/api/status',{cache:'no-store'})).json();
-  const p=s.pnl,r=s.risk;
+  const p=s.pnl,r=s.risk,h=s.health||{};
+  const hv=document.getElementById('health');
+  hv.textContent=h.state||'-';
+  // Colour by severity so the verdict reads at a glance, not on inspection.
+  const bad=['HALTED','LOSING','OVEREXPOSED','STUCK'],warn=['RECONCILING','RATE-LIMITED','WARMING-UP'];
+  hv.className='big '+(bad.includes(h.state)?'neg':(warn.includes(h.state)?'':'pos'));
+  document.getElementById('healthcard').style.borderColor=
+    bad.includes(h.state)?'#e5484d':(warn.includes(h.state)?'#f5a524':'#2a2f3a');
+  document.getElementById('healthdetail').textContent=h.detail||'';
+  document.getElementById('healthextra').textContent=
+    (h.all&&h.all.length>1)?h.all.slice(1).map(x=>x.state).join(' · '):'';
   document.getElementById('venue').textContent=s.venue+' / '+s.network;
   const m=document.getElementById('mode');m.textContent=s.mode;m.className='badge'+(s.mode==='live'?' live':'');
   document.getElementById('strategy').textContent=s.strategy;

@@ -48,6 +48,11 @@ from .ws import ArcusWS, account_channels, market_channels
 log = logging.getLogger("arcusbot.engine")
 
 
+def _m(value: Decimal) -> str:
+    """Money, rounded for human eyes."""
+    return dec_str(D(value).quantize(Decimal("0.01")))
+
+
 class Engine:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -80,6 +85,7 @@ class Engine:
         self.reconciles = 0
         self.mainnet_cap: Decimal | None = None
         self.adaptive: dict[str, AdaptiveController] = {}
+        self.last_fill_at = 0.0
 
     # ------------------------------------------------------------ bootstrap --
     def _load_markets(self) -> dict[str, dict[str, Any]]:
@@ -387,10 +393,16 @@ class Engine:
             elif channel == "userFills":
                 for fill in fills_from_ws(contents, self.pnl.fees):
                     if fill.market and self.pnl.record_fill(fill):
+                        self.last_fill_at = time.time()
                         log.info("FILL %s %s %s @ %s (%s, fee %s)",
                                  fill.market, fill.side, dec_str(fill.size),
                                  dec_str(fill.price), fill.liquidity, dec_str(fill.fee))
+                        ctl = self.adaptive.get(fill.market)
+                        state = self.states.get(fill.market)
                         worker = self.workers.get(fill.market)
+                        if ctl is not None and state is not None and state.reference_price:
+                            ctl.note_fill(fill.side, fill.price, state.reference_price,
+                                          worker.edge_bps() if worker else Decimal(0))
                         if worker and fill.client_id:
                             worker.on_terminal(fill.client_id)
             elif channel == "orders":
@@ -784,6 +796,7 @@ class Engine:
             fill = event.get("fill")
             if fill is None or not self.pnl.record_fill(fill):
                 continue
+            self.last_fill_at = time.time()
             log.info("FILL %s %s %s @ %s (%s, fee %s)",
                      fill.market, fill.side, dec_str(fill.size), dec_str(fill.price),
                      fill.liquidity, dec_str(fill.fee))
@@ -909,6 +922,62 @@ class Engine:
             log.debug("position refresh failed: %s", exc)
 
     # -------------------------------------------------------------- status --
+    def health(self, pnl_snapshot: dict[str, Any]) -> dict[str, Any]:
+        """One verdict an operator can read in a couple of seconds.
+
+        Ordered by severity: the worst true condition wins, because that is
+        the one that needs a decision. Everything else is detail.
+        """
+        risk = self.risk.snapshot()
+        net = D(pnl_snapshot.get("netPnl", 0))
+        volume = D(pnl_snapshot.get("volumeUsd", 0))
+        states: list[tuple[str, str]] = []
+
+        if self.risk.halt_reason:
+            states.append(("HALTED", risk.get("haltReason") or self.exit_reason or "halted"))
+        if self.needs_reconcile or self.pending_unknown:
+            states.append(("RECONCILING",
+                           f"{len(self.pending_unknown)} order(s) of unknown status — "
+                           f"not opening new exposure"))
+        if self.rest.budget.throttled_s > 0 or any(
+                c.is_rate_limited() for c in self.adaptive.values()):
+            states.append(("RATE-LIMITED", "backing off the API"))
+
+        inventory = sum((abs(D(m.get("position", 0))) * D(m.get("mid") or 0)
+                         for m in (w.snapshot() for w in self.workers.values())), Decimal(0))
+        if (self.cfg.max_inventory_notional_usd > 0
+                and inventory > self.cfg.max_inventory_notional_usd):
+            states.append(("OVEREXPOSED",
+                           f"inventory ${_m(inventory)} over the "
+                           f"${_m(self.cfg.max_inventory_notional_usd)} cap"))
+
+        stuck_for = time.time() - (self.last_fill_at or self.started_at)
+        if volume <= 0 and stuck_for > 120:
+            states.append(("STUCK", f"no fills in {int(stuck_for)}s"))
+
+        if not states:
+            if volume <= 0:
+                states.append(("WARMING-UP", "no volume yet"))
+            elif net > 0:
+                states.append(("PROFITABLE",
+                               f"net ${_m(net)} on ${_m(volume)} volume"))
+            elif net < 0:
+                states.append(("LOSING",
+                               f"net ${_m(net)} on ${_m(volume)} volume"))
+            else:
+                states.append(("BREAKEVEN", f"net $0 on ${_m(volume)} volume"))
+
+        level, detail = states[0]
+        return {
+            "state": level,
+            "detail": detail,
+            "all": [{"state": s, "detail": d} for s, d in states],
+            "netPnl": dec_str(net.quantize(Decimal("0.01"))),
+            "netBpsOfVolume": dec_str(D(pnl_snapshot.get("netBpsOfVolume") or 0)
+                                      .quantize(Decimal("0.01"))),
+            "inventoryUsd": dec_str(inventory.quantize(Decimal("0.01"))),
+        }
+
     def status(self) -> dict[str, Any]:
         pnl_snapshot = self.pnl.snapshot()
         return {
@@ -923,7 +992,16 @@ class Engine:
             "cancelsSent": self.cancels_sent,
             "rejects": self.rejects,
             "exitReason": self.exit_reason if self.stopping.is_set() else None,
+            "health": self.health(pnl_snapshot),
             "risk": self.risk.snapshot(),
+            "reconcile": {
+                "pendingUnknown": len(self.pending_unknown),
+                "needsReconcile": self.needs_reconcile,
+                "reconciles": self.reconciles,
+                "orders": list(self.pending_unknown.values()),
+            },
+            "adaptive": {name: (w.adjustment.as_dict() if w.adjustment else None)
+                         for name, w in self.workers.items()},
             "pnl": pnl_snapshot,
             "capital": self.allocation.as_dict() if self.allocation else None,
             "capitalResizes": self.resizes,

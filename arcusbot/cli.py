@@ -56,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["run", "preflight", "markets", "quote", "report",
                             "selftest", "sweep", "history"])
     p.add_argument("--venue", choices=["arcus", "sim"], help="arcus (real API) or sim (offline)")
+    p.add_argument("--network", choices=["testnet", "mainnet"],
+                   help="testnet (default) or mainnet (requires the mainnet gate; see docs)")
     p.add_argument("--mode", choices=["dry-run", "live"], help="dry-run signs nothing, live sends orders")
     p.add_argument("--strategy", choices=["volume-maker", "ping-pong", "spot-rfq"])
     p.add_argument("--markets", help="comma-separated market list, e.g. BTC-USD,ETH-USD")
@@ -70,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--spread-bps", type=str, help="target maker spread in bps")
     p.add_argument("--duration", type=int, help="max runtime in seconds (0 = unlimited)")
     p.add_argument("--volume-target", type=str, help="stop after this much USD volume")
+    p.add_argument("--max-drawdown", type=str, metavar="USD",
+                   help="halt if net PnL falls this far below its peak "
+                        "(only ever tightens the configured limit)")
+    p.add_argument("--rank", action="store_true",
+                   help="markets: score and rank markets for the current capital")
     p.add_argument("--port", type=int, help="dashboard port (0 disables)")
     p.add_argument("--spot", action="store_true", help="enable the spot RFQ leg")
     p.add_argument("--log-level", help="DEBUG/INFO/WARNING")
@@ -84,6 +91,8 @@ def config_from_args(args: argparse.Namespace) -> Config:
     overrides: dict[str, Any] = {}
     if args.venue:
         overrides["venue"] = args.venue
+    if args.network:
+        overrides["network"] = args.network
     if args.mode:
         overrides["mode"] = args.mode
     if args.strategy:
@@ -106,12 +115,31 @@ def config_from_args(args: argparse.Namespace) -> Config:
         overrides["max_runtime_s"] = args.duration
     if args.volume_target:
         overrides["volume_target_usd"] = Decimal(args.volume_target)
+    if args.max_drawdown:
+        overrides["max_drawdown_usd"] = Decimal(args.max_drawdown)
     if args.port is not None:
         overrides["metrics_port"] = args.port
     if args.spot:
         overrides["enable_spot"] = True
     if args.log_level:
         overrides["log_level"] = args.log_level.upper()
+
+    # A convenience flag must never be a way around a risk limit. Anything on
+    # this list may be made stricter from the command line, never looser: the
+    # configured (env/.env) value is the ceiling.
+    RISK_CEILINGS = ("max_drawdown_usd", "volume_target_usd")
+    if any(k in overrides for k in RISK_CEILINGS):
+        configured = Config.from_env()
+        for key in RISK_CEILINGS:
+            if key not in overrides:
+                continue
+            limit = getattr(configured, key, None)
+            if limit and limit > 0 and overrides[key] > limit:
+                print(f"note: --{key.replace('_usd', '').replace('_', '-')} "
+                      f"{overrides[key]} exceeds the configured limit {limit}; "
+                      f"using {limit} (the CLI may only tighten risk limits)")
+                overrides[key] = limit
+
     return Config.from_env(**overrides)
 
 
@@ -236,12 +264,14 @@ def cmd_preflight(cfg: Config, as_json: bool) -> int:
     return 0 if not fatal else 1
 
 
-def cmd_markets(cfg: Config, as_json: bool) -> int:
+def cmd_markets(cfg: Config, as_json: bool, rank: bool = False) -> int:
     if cfg.venue == "sim":
         from .sim import SIM_MARKETS
         markets = SIM_MARKETS
     else:
         markets = ArcusREST(cfg, Signer(cfg.api_secret) if cfg.api_secret else None).markets(refresh=True)
+    if rank:
+        return _print_market_ranking(cfg, markets, as_json)
     rows = sorted(markets.values(), key=lambda m: int(m["marketId"]))
     if as_json:
         print(json.dumps(rows, indent=2))
@@ -253,6 +283,39 @@ def cmd_markets(cfg: Config, as_json: bool) -> int:
               f"{str(m.get('tickSize','')):>10} {str(m.get('stepSize','')):>12} "
               f"{str(m.get('minOrderNotional','')):>12} {str(m.get('markPrice',''))[:14]:>14}")
     print(f"\n{len(rows)} markets")
+    return 0
+
+
+def _print_market_ranking(cfg: Config, markets: dict, as_json: bool) -> int:
+    """Score markets for the capital we actually have."""
+    from .capital import plan_capital
+    from .selection import max_markets_for_capital, select_markets
+
+    equity = cfg.capital_usd or Decimal("1000")
+    alloc = plan_capital(cfg, equity, len(markets) or 1)
+    deployable = alloc.deployable_usd
+    chosen, ranked = select_markets(
+        markets.values(), deployable=deployable,
+        required_edge_bps=max(cfg.min_edge_bps, Decimal("3")),
+    )
+
+    if as_json:
+        print(json.dumps({
+            "deployableUsd": dec_str(deployable),
+            "maxMarkets": max_markets_for_capital(deployable),
+            "chosen": chosen,
+            "ranked": [c.as_dict() for c in ranked],
+        }, indent=2))
+        return 0
+
+    print(f"deployable ${dec_str(deployable)} -> at most "
+          f"{max_markets_for_capital(deployable)} market(s)\n")
+    print(f"{'':>2} {'market':<14} {'score':>7}  why")
+    for i, c in enumerate(ranked, 1):
+        mark = "->" if c.market in chosen else ("  " if c.tradable else "x ")
+        why = "; ".join(c.reasons) if c.reasons else "ok"
+        print(f"{mark} {c.market:<14} {dec_str(c.score.quantize(Decimal('0.001'))):>7}  {why[:90]}")
+    print(f"\nselected: {', '.join(chosen) if chosen else '(none tradable at this size)'}")
     return 0
 
 
@@ -421,7 +484,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "preflight":
         return cmd_preflight(cfg, args.json)
     if args.command == "markets":
-        return cmd_markets(cfg, args.json)
+        return cmd_markets(cfg, args.json, rank=args.rank)
     if args.command == "history":
         return cmd_history(cfg, args.json)
     if args.command == "report":
