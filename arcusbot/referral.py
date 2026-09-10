@@ -30,7 +30,7 @@ from typing import Any
 from .scaling import dec_str
 
 # Default attribution for this tool. Override in .env to use your own.
-DEFAULT_REFERRAL_TESTNET = "AAAA"
+DEFAULT_REFERRAL_TESTNET = "ARCUS"
 DEFAULT_REFERRAL_MAINNET = "AIAGENT"
 
 TESTNET_REF_BASE = "https://testnet.arcus.xyz/ref/"

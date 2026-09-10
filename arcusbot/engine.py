@@ -166,7 +166,17 @@ class Engine:
         if missing:
             log.warning("skipping unknown markets: %s", ", ".join(missing))
         if not wanted:
-            raise RuntimeError(f"none of {self.cfg.markets} exist on the venue")
+            import difflib
+            available = sorted(markets)
+            hints = []
+            for want in self.cfg.markets:
+                close = difflib.get_close_matches(want.upper(), available, n=1, cutoff=0.5)
+                if close:
+                    hints.append(f"{want} -> did you mean {close[0]}?")
+            detail = ("; ".join(hints) if hints
+                      else f"available: {', '.join(available[:8])}")
+            raise RuntimeError(
+                f"none of {self.cfg.markets} exist on the venue ({detail})")
 
         for name in wanted:
             meta = markets[name]

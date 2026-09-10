@@ -470,7 +470,52 @@ async def cmd_run(cfg: Config) -> int:
             server.shutdown()
 
 
+# Failures a newcomer is most likely to hit, mapped to what to actually do.
+# A stack trace tells a beginner nothing; these tell them the next command.
+_FRIENDLY_ERRORS: list[tuple[str, str]] = [
+    ("network error", "Could not reach the Arcus API.\n"
+                      "  - Check your internet connection and any proxy/VPN.\n"
+                      "  - Everything works offline with:  --venue sim\n"
+                      "  - Try:  python -m arcusbot selftest --venue sim"),
+    ("exist on the venue", "One or more markets do not exist on this venue.\n"
+                           "  - List the real ones with:  python -m arcusbot markets --venue sim\n"
+                           "  - Names use a dash, e.g. BTC-USD (not BTCUSD)."),
+    ("Unauthorized", "The API key was rejected.\n"
+                     "  - Re-check ARCUS_API_KEY / ARCUS_API_SECRET in .env\n"
+                     "  - Register a key with:  python tools/onboard.py --private-key 0x..."),
+    ("refusing to trade live on mainnet", "The mainnet safety gate blocked this run.\n"
+                                          "  - This is intentional. See docs/BOT_OPERATIONS.md section 8."),
+]
+
+
+def _explain(exc: BaseException) -> str:
+    text = str(exc)
+    for needle, advice in _FRIENDLY_ERRORS:
+        if needle.lower() in text.lower():
+            return advice
+    return ""
+
+
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        return 130
+    except Exception as exc:  # noqa: BLE001 - top-level friendliness
+        advice = _explain(exc)
+        print(f"\nerror: {exc}", file=sys.stderr)
+        if advice:
+            print(f"\n{advice}", file=sys.stderr)
+        else:
+            print("\nIf this looks like a bug, re-run with --log-level DEBUG "
+                  "for the full traceback.", file=sys.stderr)
+        if (argv or sys.argv[1:]) and "--log-level" in (argv or sys.argv[1:]):
+            raise
+        return 1
+
+
+def _main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = config_from_args(args)
     setup_logging(cfg)
@@ -479,6 +524,13 @@ def main(argv: list[str] | None = None) -> int:
     if problems and args.command in {"run", "selftest"}:
         for p in problems:
             print(f"config error: {p}", file=sys.stderr)
+        if any("ARCUS_ADDRESS" in p or "ARCUS_API_SECRET" in p for p in problems):
+            print("\nLive trading needs API credentials. Either:\n"
+                  "  - practise offline with no keys:  "
+                  "python -m arcusbot run --venue sim --mode dry-run\n"
+                  "  - or register a key:  cp .env.example .env && "
+                  "python tools/onboard.py --private-key 0x...",
+                  file=sys.stderr)
         return 2
 
     if args.command == "preflight":

@@ -15,6 +15,34 @@ Python 3.11+, stdlib-only except `cryptography` and `websockets`.
 
 ---
 
+## New here? Start with this
+
+No API key, no wallet, no money, no internet needed — this runs against a
+built-in paper exchange:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m arcusbot selftest --venue sim          # ~40s, prints SELFTEST OK
+.venv/bin/python -m arcusbot run --venue sim --mode dry-run --duration 120 --port 8080
+```
+
+Then open <http://localhost:8080> and watch it quote. The big word at the top
+(`PROFITABLE` / `LOSING` / `WARMING-UP` / `HALTED`) is the whole status in one
+glance.
+
+**The four safety levels** — understand these before anything else:
+
+| | Command | Network | Can lose money? |
+| --- | --- | --- | --- |
+| 1 | `--venue sim` | none | **No** — fake exchange on your laptop |
+| 2 | `--venue arcus --mode dry-run` | read-only | **No** — prints orders, sends nothing |
+| 3 | `--mode live` on testnet | yes | No — testnet funds are worthless |
+| 4 | `--mode live` on **mainnet** | yes | **YES — real money**, and gated |
+
+Full beginner walkthrough: [`docs/BOT_OPERATIONS.md` §1b](docs/BOT_OPERATIONS.md).
+
+---
+
 ## Quick start
 
 ```bash
@@ -112,8 +140,8 @@ A round trip only makes money if the captured spread beats the fees it pays:
 net_edge_bps = captured_spread − fee(open) − fee(close)
 ```
 
-At 1.5 bps maker / 4 bps taker, a maker/maker cycle needs **> 3 bps** and a
-maker/taker cycle needs **> 5.5 bps**. So the bot:
+At the published Base tier of 1.5 bps maker / 4.5 bps taker, a maker/maker cycle
+needs **> 3 bps** and a maker/taker cycle needs **> 6 bps**. So the bot:
 
 - quotes **ALO (post-only)** on both sides — it is structurally incapable of
   accidentally paying a taker fee;
@@ -191,7 +219,7 @@ edge right first, then scale clip size — quoting faster mostly burns rate limi
 
 Signing up through these links credits this tool:
 
-- testnet — <https://testnet.arcus.xyz/ref/AAAA>
+- testnet — <https://testnet.arcus.xyz/ref/ARCUS>
 - mainnet — <https://app.arcus.xyz/ref/AIAGENT>
 
 Attribution happens at **signup**, in a browser; it never touches an order or

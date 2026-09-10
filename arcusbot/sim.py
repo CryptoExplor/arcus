@@ -62,11 +62,27 @@ SIM_MARKETS: dict[str, dict[str, Any]] = {
     },
 }
 
+# The REAL published Arcus perpetuals fee schedule, transcribed from the
+# exchange's "Perpetuals Fee Tiers" table. Percentages -> ppm (0.0150% = 150ppm).
+#
+# Two things here matter enormously to this bot and were previously guessed
+# wrong by the simulator:
+#   1. Taker at the base tier is 0.0450% (450ppm), not 400ppm. The base
+#      round trip is therefore MORE expensive than earlier sweeps assumed.
+#   2. Maker rebates do not start until $1B of 30d volume. Any strategy that
+#      quietly relies on earning a rebate is fantasy at realistic volumes.
+#
+# The live bot always prefers GET /v1/feetiers at runtime; this table only
+# backs the offline simulator. Verify against the exchange before trusting it.
 SIM_FEE_TIERS = {
     "tiers": [
-        {"level": 0, "name": "Base", "volumeThreshold": 0, "makerFeePpm": 150, "takerFeePpm": 400},
-        {"level": 1, "name": "VIP1", "volumeThreshold": 1_000_000, "makerFeePpm": 50, "takerFeePpm": 300},
-        {"level": 2, "name": "VIP2", "volumeThreshold": 10_000_000, "makerFeePpm": -50, "takerFeePpm": 250},
+        {"level": 0, "name": "Base",  "volumeThreshold": 0,             "makerFeePpm": 150, "takerFeePpm": 450},
+        {"level": 1, "name": "Tier1", "volumeThreshold": 5_000_000,     "makerFeePpm": 120, "takerFeePpm": 380},
+        {"level": 2, "name": "Tier2", "volumeThreshold": 20_000_000,    "makerFeePpm": 80,  "takerFeePpm": 320},
+        {"level": 3, "name": "Tier3", "volumeThreshold": 100_000_000,   "makerFeePpm": 40,  "takerFeePpm": 270},
+        {"level": 4, "name": "Tier4", "volumeThreshold": 400_000_000,   "makerFeePpm": 0,   "takerFeePpm": 230},
+        {"level": 5, "name": "Tier5", "volumeThreshold": 1_000_000_000, "makerFeePpm": -20, "takerFeePpm": 200},
+        {"level": 6, "name": "Tier6", "volumeThreshold": 3_000_000_000, "makerFeePpm": -30, "takerFeePpm": 190},
     ]
 }
 

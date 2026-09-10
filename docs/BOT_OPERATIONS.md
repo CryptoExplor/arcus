@@ -26,6 +26,53 @@ expensive.
 
 ---
 
+## 1b. Absolute beginner: five minutes, no keys, no money
+
+If you have never run this before, do exactly this. It needs no API key, no
+wallet, no funds and no internet access to the exchange — it runs against a
+built-in paper exchange.
+
+```bash
+git clone <this repo> && cd arcus
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+.venv/bin/python -m arcusbot selftest --venue sim
+```
+
+You should see `SELFTEST OK` after about 40 seconds. That means the maths,
+the risk guards and the accounting all work on your machine.
+
+**Then watch it trade, with a live dashboard:**
+
+```bash
+.venv/bin/python -m arcusbot run --venue sim --mode dry-run --duration 120 --port 8080
+```
+
+Open <http://localhost:8080>. The big word at the top tells you what is
+happening: `PROFITABLE`, `LOSING`, `WARMING-UP`, and so on. Nothing here can
+cost you anything — `--venue sim` never touches the network.
+
+**What the four safety levels mean** (this is the thing to understand before
+anything else):
+
+| | Command | Touches network? | Can lose money? |
+| --- | --- | --- | --- |
+| 1 | `--venue sim` | No | **No** — a fake exchange on your laptop |
+| 2 | `--venue arcus --mode dry-run` | Reads only | **No** — prints orders instead of sending |
+| 3 | `--venue arcus --mode live` on **testnet** | Yes | No — testnet funds are worthless |
+| 4 | `--venue arcus --mode live` on **mainnet** | Yes | **YES — real money** |
+
+Levels 1 and 2 are free to experiment with. Level 3 needs an API key. Level 4
+additionally needs the deliberate opt-in described in section 8, and is capped.
+
+**If something goes wrong**, the bot tries to tell you what to do next — for
+example a mistyped market prints `did you mean BTC-USD?`, and a network failure
+points you back to `--venue sim`. If you get stuck, `--log-level DEBUG` shows
+the full detail.
+
+---
+
 ## 2. Setup
 
 ```bash
@@ -39,7 +86,7 @@ template with the same keys. Values may carry inline `# comments`, and real
 environment variables always override the file — `BOT_SPREAD_BPS=12 python -m
 arcusbot run` works as expected.
 
-New to Arcus? Signing up through <https://testnet.arcus.xyz/ref/AAAA>
+New to Arcus? Signing up through <https://testnet.arcus.xyz/ref/ARCUS>
 (mainnet: <https://app.arcus.xyz/ref/AIAGENT>) credits this tool.
 
 ### Credentials
@@ -158,7 +205,7 @@ python -m arcusbot preflight --capital-pct 30 --reserve 150   # preview the plan
 ### Referral
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ARCUS_REFERRAL_TESTNET` | `AAAA` | code for `testnet.arcus.xyz/ref/<code>` |
+| `ARCUS_REFERRAL_TESTNET` | `ARCUS` | code for `testnet.arcus.xyz/ref/<code>` |
 | `ARCUS_REFERRAL_MAINNET` | `AIAGENT` | code for `app.arcus.xyz/ref/<code>` |
 | `BOT_SHOW_REFERRAL` | `true` | `false` hides the banner everywhere |
 

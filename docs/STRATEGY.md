@@ -44,9 +44,10 @@ With maker fees `m` and taker fees `t`:
 | maker in, taker out | `m + t` | acceptable when inventory must go |
 | taker in, taker out | `2t` | pure fee donation; never deliberate |
 
-At a Base tier of 1.5 bps maker / 4 bps taker, a maker/maker cycle needs
+At the published Base tier of **1.5 bps maker / 4.5 bps taker**, a maker/maker
+cycle needs
 **> 3 bps** of captured spread just to break even, and a maker/taker cycle needs
-**> 5.5 bps**. This is why `BOT_SPREAD_BPS` defaults to **10** and why the code
+**> 6 bps**. This is why `BOT_SPREAD_BPS` defaults to **10** and why the code
 physically refuses to quote a pair tighter than
 `PnLTracker.edge_required_bps()`. Fee tiers are read live from `/v1/feetiers` —
 at high volume, maker fees go **negative** (rebates), which flips the arithmetic
@@ -81,7 +82,7 @@ sixty maker fills at 25×10 bps.
   reducing side more attractive so the book flattens you for free.
 - `BOT_MAX_INVENTORY_NOTIONAL_USD` → flatten-only mode.
 - `BOT_INVENTORY_MAX_AGE_S` → cross the spread and pay the taker fee.
-  Paying a known, bounded 4 bps beats carrying unbounded directional risk.
+  Paying a known, bounded 4.5 bps beats carrying unbounded directional risk.
 
 ### 2.3 Fee drag
 
@@ -302,13 +303,44 @@ except that you can tune a simulator.
 
 ---
 
-## 4b. What the latest measurements actually show
+## 4b. The real fee schedule
 
-Measured 2026-09-10 in the simulator, 3 seeds x 14s per configuration, after the
-adaptive layer and the multi-market inventory fix. **These are simulator
-numbers and they do not demonstrate profitability.**
+Transcribed from the exchange's published **Perpetuals Fee Tiers** table. The
+simulator ships these exact numbers (`sim.SIM_FEE_TIERS`, pinned by
+`test_sim_schedule_matches_the_published_arcus_tiers`); the live bot always
+reads `GET /v1/feetiers` at runtime and never hard-codes them.
 
-Default (hostile) flow — `SIM_UNINFORMED_RATE=0.25`:
+| Tier | 30d volume | Maker | Taker | Maker/maker RT | Maker/taker RT |
+| --- | --- | --- | --- | --- | --- |
+| 0 | $0 | 1.5 bps | 4.5 bps | 3.0 bps | 6.0 bps |
+| 1 | >= $5M | 1.2 | 3.8 | 2.4 | 5.0 |
+| 2 | >= $20M | 0.8 | 3.2 | 1.6 | 4.0 |
+| 3 | >= $100M | 0.4 | 2.7 | 0.8 | 3.1 |
+| 4 | >= $400M | **0** | 2.3 | **0** | 2.3 |
+| 5 | >= $1B | **-0.2** (rebate) | 2.0 | **-0.4** | 1.8 |
+| 6 | >= $3B | **-0.3** (rebate) | 1.9 | **-0.6** | 1.6 |
+
+Two consequences worth stating plainly:
+
+* **Maker rebates begin at $1B of 30-day volume.** At the bot's realistic
+  throughput that is unreachable, so any reasoning that leans on earning a
+  rebate is fantasy. The rebate code paths exist and are tested, but they
+  should be treated as unreachable in practice.
+* **The base maker/taker round trip is 6 bps, not 5.5.** Every taker escalation
+  (stale inventory, over-cap, shutdown) is more expensive than earlier drafts of
+  this document assumed, which strengthens the existing rule that crossing the
+  spread is a last resort.
+
+---
+
+## 4c. What the latest measurements actually show
+
+Measured 2026-09-10 in the simulator, 3 seeds x 14s per configuration, using the
+**corrected** fee schedule above. **These are simulator numbers and they do not
+demonstrate profitability.**
+
+Default (hostile) flow — `SIM_UNINFORMED_RATE=0.25`, i.e. mostly informed
+counterparties:
 
 | Spread | Volume | Net bps | Stdev | Maker% | Verdict |
 | --- | --- | --- | --- | --- | --- |
@@ -320,32 +352,35 @@ Mixed flow — `SIM_UNINFORMED_RATE=0.7`:
 
 | Spread | Volume | Net bps | Stdev | Maker% | Verdict |
 | --- | --- | --- | --- | --- | --- |
-| 10 | $1,484 | **-3.23** | 4.59 | 75.9% | loses |
-| 16 | $1,852 | **+0.42** | 1.42 | 89.4% | **within noise** |
+| 10 | $1,764 | **-1.79** | 4.93 | 81.2% | loses |
+| 16 | $1,890 | **+0.82** | 2.06 | 90.7% | **within noise** |
+| 22 | $1,456 | **-3.52** | 5.67 | 85.4% | loses |
 
-Read this carefully. The single positive result, +0.42 bps, has a standard
-deviation of 1.42 across seeds — the error bar is more than three times the
-signal. **That is not evidence of an edge.** The honest summary is:
+Read this carefully. The single positive result, +0.82 bps, has a standard
+deviation of 2.06 across seeds — the error bar is more than twice the signal.
+**That is not evidence of an edge.** The honest summary:
 
 * Against predominantly informed flow the strategy loses at every spread
   tested. Adverse selection exceeds the captured spread. This is the expected
   result for a pure maker with no directional model, and tuning the simulator
-  until it looks better would be self-deception.
-* Against mixed flow with a wide (16 bps) spread it is approximately
+  until it looked better would be self-deception.
+* Against mixed flow at a wide (16 bps) spread it is approximately
   **break-even**, which is the stated objective — volume that pays for itself.
-* Maker share is consistently 84–93%, so the fee side is working as designed.
+* Both too tight (10) and too wide (22) are worse: too tight gets picked off,
+  too wide stops filling and the few fills that land are the informed ones.
+* Maker share is consistently 81–91%, so the fee side is working as designed.
 
-The practical conclusion: **the spread must be wide, and the flow must not be
-predominantly informed.** Neither is something the bot controls, which is
-precisely why the mainnet capital cap exists and why testnet must demonstrate a
-positive `netBpsOfVolume` over days — not one 14-second sample — before real
-money is committed.
+The practical conclusion: **the spread must be near 16 bps, and the flow must
+not be predominantly informed.** Neither is something the bot controls, which is
+exactly why the mainnet capital cap exists and why testnet must show a positive
+`netBpsOfVolume` over days — not one 14-second sample — before real money is
+committed.
 
 Reproduce with:
 
 ```bash
 python -m arcusbot sweep --sweep-spreads 8,14,22 --sweep-seeds 3 --sweep-duration 14
-SIM_UNINFORMED_RATE=0.7 python -m arcusbot sweep --sweep-spreads 10,16 --sweep-seeds 3
+SIM_UNINFORMED_RATE=0.7 python -m arcusbot sweep --sweep-spreads 10,16,22 --sweep-seeds 3
 ```
 
 ---

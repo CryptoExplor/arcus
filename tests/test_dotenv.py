@@ -98,8 +98,8 @@ def test_missing_file_is_not_an_error(tmp_path) -> None:
 
 
 def test_urls_survive_intact(env_file) -> None:
-    load_dotenv(env_file("T_K=https://testnet.arcus.xyz/ref/AAAA   # referral\n"))
-    assert os.environ["T_K"] == "https://testnet.arcus.xyz/ref/AAAA"
+    load_dotenv(env_file("T_K=https://testnet.arcus.xyz/ref/ARCUS   # referral\n"))
+    assert os.environ["T_K"] == "https://testnet.arcus.xyz/ref/ARCUS"
 
 
 @pytest.mark.parametrize("raw,want", [
@@ -127,4 +127,4 @@ def test_shipped_env_example_parses_cleanly(env_file, monkeypatch) -> None:
     assert int(os.environ["ARCUS_ACCOUNT_INDEX"]) == 0
     assert float(os.environ["BOT_CAPITAL_UTILISATION"]) == 0.5
     assert int(os.environ["BOT_CAPITAL_CLIPS"]) >= 1
-    assert os.environ["ARCUS_REFERRAL_TESTNET"] == "AAAA"
+    assert os.environ["ARCUS_REFERRAL_TESTNET"] == "ARCUS"

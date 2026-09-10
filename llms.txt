@@ -350,8 +350,8 @@ Full detail: `docs/CAPITAL.md`. Tests: `tests/test_capital.py`.
 
 ## 6c. Referral and the $1B VIP milestone
 
-`referral.py` holds signup links (`ARCUS_REFERRAL_TESTNET` default `AAAA` →
-`https://testnet.arcus.xyz/ref/AAAA`; `ARCUS_REFERRAL_MAINNET` default
+`referral.py` holds signup links (`ARCUS_REFERRAL_TESTNET` default `ARCUS` →
+`https://testnet.arcus.xyz/ref/ARCUS`; `ARCUS_REFERRAL_MAINNET` default
 `AIAGENT` → `https://app.arcus.xyz/ref/AIAGENT`). **Referral attribution is a
 signup-time browser concern — never inject a code into an order payload.** The
 banner is suppressed by `BOT_SHOW_REFERRAL=false`.
