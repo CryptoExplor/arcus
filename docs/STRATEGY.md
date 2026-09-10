@@ -171,6 +171,42 @@ The practical consequence: the edge widens as you climb tiers, so a spread that
 is marginal at Base may be comfortably profitable at VIP1. Re-measure after a
 tier change rather than assuming the old setting still holds.
 
+## 3c. Adapting to what the market does back
+
+A fixed spread is a bet that conditions never change. `arcusbot/adaptive.py`
+turns the exchange's feedback into two multipliers — one on the required edge,
+one on the re-quote interval — and applies them every loop.
+
+| Signal | Effect | Reasoning |
+| --- | --- | --- |
+| Net PnL falling over the window | edge x1.35, interval x1.5 | The strategy is being beaten; demand more and trade less |
+| >60% of fills move against us | edge x(1 + excess) | Direct measurement of adverse selection |
+| Volatility exceeds the spread | edge up to x2 | The spread cannot pay for the risk being taken |
+| Top-of-book depth < 3x our clip | edge x1.2, interval x1.3 | We *are* the liquidity; fills will be informed |
+| Inventory > 70% of cap | interval x1.4 | Prioritise reducing over adding |
+| Inventory older than 5 min | edge x1.15 | Stale risk should cost more to add to |
+| Rate limited | interval x2.5 | Back off rather than collect 429s |
+| >=3 API errors in 60s | interval up to x2.5 | Something is wrong; slow down |
+
+**Speeding up is the only adjustment with preconditions.** The interval is
+reduced (x0.75) *only* when net PnL is rising, fewer than 40% of fills are
+adverse, there have been no API errors, the bot is not rate limited, quotes are
+actually filling (>10%) and inventory is under half the cap. Any single one of
+those failing leaves the frequency alone.
+
+This is the rule that keeps "generate volume" honest: **the bot never trades
+faster while it is losing money.** Volume is only worth having if it is not
+being bought with capital.
+
+Both multipliers are bounded (edge 0.85x–4x, interval 0.6x–6x) so stacked bad
+news cannot produce an absurd quote or a frozen bot, and the adaptive edge is
+always floored at the fee-derived minimum — no market condition makes an
+unprofitable fill acceptable.
+
+Live values are in `status.json` under `adaptive`, per market.
+
+---
+
 ## 4. Measuring the edge honestly
 
 ### The simulator's job

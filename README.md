@@ -1,12 +1,17 @@
-# arcus — automated testnet volume bot
+# arcus — automated trading bot
 
 An automated market-making bot for the [Arcus](https://docs.arcus.xyz) exchange
-(perpetuals + Stock Token spot), built for **testnet**. It quotes, executes,
-monitors, and accounts for its own PnL, with one objective:
+(perpetuals + Stock Token spot). It quotes, executes, monitors, and accounts for
+its own PnL, with one objective:
 
 > **generate as much volume as possible while net PnL after fees stays ≥ 0.**
 
+Runs on **testnet** by default. Mainnet is supported but **gated**: live trading
+with real funds requires five explicit opt-ins and is hard-capped by the risk
+engine, not by documentation ([details](docs/BOT_OPERATIONS.md#8-going-live-on-mainnet-with-a-20-budget)).
+
 Python 3.11+, stdlib-only except `cryptography` and `websockets`.
+256 tests, no network required.
 
 ---
 
@@ -33,6 +38,13 @@ cp .env.example .env
 # 5. Real orders, small and time-boxed.
 .venv/bin/python -m arcusbot run --mode live --duration 900 --notional 25 --port 8080
 ```
+
+Mainnet is a separate, deliberate step — see
+[the runbook](docs/BOT_OPERATIONS.md#8-going-live-on-mainnet-with-a-20-budget).
+The short version: `ARCUS_NETWORK=mainnet`, `BOT_MODE=live`,
+`BOT_MAINNET_ENABLED=true`, `BOT_MAINNET_CAPITAL_USD=20` and
+`BOT_MAINNET_ACK=i-understand-the-risk` must **all** be set. Anything missing or
+malformed refuses the run and says exactly what is wrong.
 
 Fund the account with the **Testnet Deposit** button in the web app (~$1,000
 USDG), or `tools/fund_testnet.py` for more.
@@ -191,13 +203,15 @@ affects execution. Forking? Put your own codes in `ARCUS_REFERRAL_TESTNET` /
 ## Layout
 
 ```
-arcusbot/    signing scaling config capital referral session rest ws book pnl
-             risk strategy sim sweep engine dashboard cli
+arcusbot/    signing scaling config capital mainnet selection adaptive referral
+             session rest ws book pnl risk strategy sim sweep engine
+             dashboard cli
 tools/       onboard.py (API key registration), fund_testnet.py (on-chain deposit)
-tests/       172 offline tests — signing, tick math, PnL identity, risk,
-             capital, referral, persistence, fee tiers, .env parsing
+tests/       256 offline tests — signing, tick math, PnL identity, risk,
+             capital sizing, execution/reconciliation, mainnet gate, market
+             selection, adaptive control, persistence, fee tiers, .env parsing
 docs/        BOT_OPERATIONS.md · ARCUS_PLATFORM.md · STRATEGY.md
-             CAPITAL.md · PERSISTENCE.md
+             CAPITAL.md · PERSISTENCE.md · AUDIT.md
 llms.txt     single-file agent guide to the bot and the venue
 .env.example template for .env (which is gitignored)
 ```
@@ -212,13 +226,21 @@ llms.txt     single-file agent guide to the bot and the venue
 | [`docs/STRATEGY.md`](docs/STRATEGY.md) | The economics, the failure modes, and how the edge was measured |
 | [`docs/CAPITAL.md`](docs/CAPITAL.md) | Budget → order sizing, reserves, re-sizing, guard rails |
 | [`docs/PERSISTENCE.md`](docs/PERSISTENCE.md) | State across restarts, loss carry-over, crash-loop breaker |
+| [`docs/AUDIT.md`](docs/AUDIT.md) | Pre-mainnet audit: defects found, impact, and how each was fixed |
 
 ---
 
 ## Safety
 
-- `--mode live` on **mainnet is refused** in `config.validate()`. This is a
-  testnet harness.
+- **Mainnet live is gated, not open.** Five conditions must all hold
+  (`ARCUS_NETWORK`, `BOT_MODE`, `BOT_MAINNET_ENABLED`, `BOT_MAINNET_CAPITAL_USD`,
+  `BOT_MAINNET_ACK`); a malformed value denies rather than defaults. The capital
+  cap is enforced by the risk engine on every re-size, and it tightens the loss
+  limits to fractions of itself. A `$100` ceiling catches fat-fingered amounts.
+- **An order of unknown status is never blind-retried.** A timeout or 5xx after
+  sending marks the order indeterminate, blocks new exposure (never closes), and
+  reconciles against the exchange's own open-order list before continuing.
+- **The bot never increases its trading frequency while losing money.**
 - API keys authorize **trading only**, never withdrawals.
 - Wallet private keys are used only locally by `tools/`, never transmitted or
   stored.
@@ -226,4 +248,4 @@ llms.txt     single-file agent guide to the bot and the venue
   Set `RISK_DEAD_MANS_SWITCH_S` for unattended runs.
 - Testnet contract addresses change on every redeploy; verify before funding.
 
-Run `.venv/bin/python -m pytest tests -q` (172 tests, no network) after any change.
+Run `.venv/bin/python -m pytest tests -q` (256 tests, no network) after any change.

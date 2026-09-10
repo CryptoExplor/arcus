@@ -21,6 +21,8 @@ expensive.
 | 6 | `python -m arcusbot run --mode dry-run` | full loop against live data, no orders |
 | 7 | `python -m arcusbot run --mode live --duration 900` | the real thing, time-boxed |
 | 8 | `python -m arcusbot history` | cumulative totals and loss carry-over across runs |
+| 9 | **testnet live for days, profitably** | whether the strategy actually works |
+| 10 | `--network mainnet` (section 8) | real money — only after rung 9 is green |
 
 ---
 
@@ -117,7 +119,7 @@ inventory risk, not just volume.
 ### Identity
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ARCUS_NETWORK` | `testnet` | `mainnet` + `live` is refused by design |
+| `ARCUS_NETWORK` | `testnet` | `mainnet` + `live` requires the gate (section 8) |
 | `ARCUS_VENUE` | `arcus` | `sim` = offline paper exchange |
 | `ARCUS_ADDRESS` | — | master wallet, `0x…` (42 chars) |
 | `ARCUS_API_SECRET` | — | Ed25519 signing key, 64 hex chars |
@@ -320,3 +322,133 @@ In order of preference:
 
 Never tighten below the fee floor: the code refuses, and it is refusing for a
 reason. Volume you paid for is not volume you earned.
+
+
+---
+
+## 8. Going live on mainnet with a $20 budget
+
+> Read this whole section before setting a single variable. Rungs 1–9 of the
+> ladder must be green first: if the bot is not profitable on testnet over
+> multiple sessions, mainnet will only lose money faster.
+
+### 8.1 What protects you
+
+The $20 limit is enforced by the **risk engine**, not by this document. Five
+conditions must all hold, they are AND-ed, and each is read straight from the
+environment so that a *malformed* value is distinguishable from an unset one.
+Anything unrecognised denies the run:
+
+| Variable | Required value | Why |
+| --- | --- | --- |
+| `ARCUS_NETWORK` | `mainnet` | Selects the real venue |
+| `BOT_MODE` | `live` | Dry-run on mainnet is always allowed and never gated |
+| `BOT_MAINNET_ENABLED` | `true` | Explicit opt-in; `ture`, `y`, `1.0` all **deny** |
+| `BOT_MAINNET_CAPITAL_USD` | e.g. `20` | The hard cap. Must be > 0 and <= the ceiling |
+| `BOT_MAINNET_ACK` | `i-understand-the-risk` | Cannot be set by accident |
+
+`BOT_MAINNET_MAX_CAPITAL_USD` (default **$100**) is a fat-finger ceiling: typing
+`2000` instead of `20` is rejected outright rather than deployed.
+
+When the gate opens the bot **tightens** its risk limits to fractions of the
+cap and logs every change:
+
+| Limit | Fraction of cap | On a $20 cap |
+| --- | --- | --- |
+| `max_drawdown_usd` | 15% | $3.00 |
+| `max_daily_loss_usd` | 20% | $4.00 |
+| `max_position_notional_usd` | 150% | $30.00 |
+| `max_inventory_notional_usd` | 100% | $20.00 |
+
+This matters: the testnet default drawdown is `$25`, which on a $20 account
+would allow losing more than the entire balance before halting. A limit you set
+*stricter* than these is always kept — the gate only ever tightens.
+
+The cap is re-checked on **every** capital re-size, so equity growth cannot
+quietly increase deployed capital.
+
+### 8.2 The sequence
+
+```bash
+# 1. Confirm the gate refuses everything by default. This MUST fail.
+ARCUS_NETWORK=mainnet BOT_MODE=live python -m arcusbot preflight
+#    -> "refusing to run live on mainnet — BOT_MAINNET_ENABLED is not true; ..."
+
+# 2. Fund the mainnet account with EXACTLY what you intend to risk ($20).
+#    The gate caps what the bot deploys; it cannot protect capital you
+#    voluntarily leave in the account.
+
+# 3. Read-only checks against mainnet.
+ARCUS_NETWORK=mainnet python -m arcusbot preflight
+ARCUS_NETWORK=mainnet python -m arcusbot markets --rank --capital 20
+#    -> a $20 account should select exactly ONE market.
+
+# 4. Dry run against real mainnet data. Signs nothing, sends nothing.
+ARCUS_NETWORK=mainnet python -m arcusbot run --mode dry-run --duration 600 --port 8080
+
+# 5. Only now, open the gate. Put these in .env, not in your shell history.
+cat >> .env <<'EOF'
+ARCUS_NETWORK=mainnet
+BOT_MAINNET_ENABLED=true
+BOT_MAINNET_CAPITAL_USD=20
+BOT_MAINNET_ACK=i-understand-the-risk
+EOF
+
+# 6. First live run: small, time-boxed, watched. Do not walk away.
+python -m arcusbot run --mode live --capital 20 --duration 900 \
+    --max-drawdown 3 --markets BTC-USD --port 8080
+```
+
+Startup logs you should see, and must read:
+
+```
+MAINNET LIVE — real funds. Hard capital cap $20.
+mainnet risk floor: max_drawdown_usd $25 -> $3
+mainnet risk floor: max_daily_loss_usd $40 -> $4
+```
+
+If you do not see those lines, you are not on the gated path — stop.
+
+### 8.3 Monitoring
+
+Open `http://localhost:8080`. The **Status** card is the whole point: it shows a
+single verdict, worst-condition-first, so you can tell in seconds whether to
+intervene.
+
+| Verdict | Meaning | Action |
+| --- | --- | --- |
+| `PROFITABLE` | Net PnL positive after fees | Leave it alone |
+| `BREAKEVEN` | Volume with no net loss | Acceptable; watch `netBpsOfVolume` |
+| `LOSING` | Net PnL negative | Watch; the bot is already widening + slowing |
+| `WARMING-UP` | No volume yet | Normal for the first minute |
+| `RECONCILING` | Order(s) of unknown status | Bot is not opening new exposure — expected to clear |
+| `RATE-LIMITED` | Backing off the API | Self-corrects; persistent = reduce markets |
+| `OVEREXPOSED` | Inventory over cap | Bot is flattening; if it persists, halt |
+| `STUCK` | No fills for 2+ minutes | Check spread vs required edge |
+| `HALTED` | Kill switch fired | **Read the reason before restarting** |
+
+### 8.4 Shutting down
+
+`Ctrl-C` once. The sequence is ordered so nothing is left dangling:
+
+1. Stop opening new exposure (risk halt)
+2. Cancel all resting orders
+3. Reduce-only flatten the inventory
+4. **Confirm** the final account state against the exchange
+5. Persist the reason and the durable risk state
+6. Print the final report
+
+Step 4 is the one that matters most: if a position could not be closed, the bot
+prints `OPEN POSITIONS REMAIN: {...} — close these manually` and records it in
+`status.json`. It never exits pretending to be flat.
+
+Do **not** `kill -9`. That skips cancel and flatten, and the venue has no
+cancel-on-disconnect — orders would stay live with nothing managing them.
+
+### 8.5 After a halt
+
+A restart does **not** hand back a spent loss budget: today's booked loss and
+the drawdown high-water mark are persisted (`state/session.json`) and carried
+forward. If the bot halted on the daily loss limit, restarting it will halt
+again — that is deliberate. Investigate the cause; do not delete the state file
+to get around it.

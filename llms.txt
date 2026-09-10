@@ -1,4 +1,4 @@
-# Arcus Testnet Volume Bot — agent guide (llms.txt)
+# Arcus Trading Bot — agent guide (llms.txt)
 
 > Machine-readable operating manual for this repository. If you are an AI agent
 > or a developer picking this up cold, read this file top to bottom before
@@ -6,9 +6,41 @@
 > exact wire rules that make orders valid, and the invariants you must not break.
 
 Repository: automated market-making / volume bot for the **Arcus** exchange
-(perpetuals + Stock Token spot), built and tuned for **testnet**.
+(perpetuals + Stock Token spot). Runs on **testnet** by default; mainnet is
+possible but **gated** (section 4b) and hard-capped by the risk engine.
 Language: Python 3.11+, stdlib-only except `cryptography` and `websockets`.
 Entry point: `python -m arcusbot <command>`.
+
+---
+
+## 0. Before you touch trading logic — read these first
+
+Do not modify anything that can place, size, cancel or price an order until you
+have read the file that owns that concern. Each line is "what you must read
+before changing X".
+
+| If you are changing... | Read, in this order |
+| --- | --- |
+| how orders are priced or sized | `arcusbot/strategy.py`, `arcusbot/scaling.py`, `docs/STRATEGY.md` |
+| anything about money at risk | `arcusbot/risk.py`, `arcusbot/capital.py`, `docs/CAPITAL.md` |
+| mainnet, live mode, or capital caps | `arcusbot/mainnet.py`, `docs/BOT_OPERATIONS.md` (mainnet section), invariant 8 below |
+| order lifecycle / retries / acks | `arcusbot/engine.py` (`_do_place`, `reconcile`), `arcusbot/rest.py` (`ArcusError.indeterminate`), `docs/AUDIT.md` A1 |
+| PnL, fees or accounting | `arcusbot/pnl.py`, invariant 7 below |
+| signing or the wire format | `arcusbot/signing.py`, `arcusbot/rest.py`, section 4 |
+| which markets are traded | `arcusbot/selection.py` |
+| how the bot reacts to conditions | `arcusbot/adaptive.py` |
+| restart behaviour | `arcusbot/session.py`, `docs/PERSISTENCE.md` |
+
+Then run `python -m pytest tests -q` (256 tests, no network, <1s). If you cannot
+explain which test would have caught your bug, you have not finished.
+
+**The three rules that override everything else:**
+
+1. An order of **unknown status is not a non-existent order**. Reconcile
+   against the exchange; never blind-retry. (`engine.reconcile`)
+2. The bot **never trades faster while losing money**. (`adaptive.py`)
+3. Mainnet capital limits are enforced by the **risk engine**, not by
+   documentation. (`mainnet.py`, `engine._resize_capital`)
 
 ---
 
@@ -70,14 +102,47 @@ at <https://testnet.arcus.xyz/api-keys>, or scripted via `tools/onboard.py`.
 | `sweep` | no | to the simulator | Measure net bps across spreads/seeds |
 | `preflight` | read-only | no | Gateway, key registration, markets, fees, balance, sizing |
 | `markets` | read-only | no | Tick/step/notional grid per market |
+| `markets --rank` | read-only | no | Score/veto markets for the capital you have |
 | `quote` | read-only | no | Print the exact intents the strategy would emit now |
 | `run --mode dry-run` | read-only | no | Full loop, logs intents instead of signing |
 | `run --mode live` | yes | **yes** | Real signed orders |
 | `report` | no | no | Reprint the last session's PnL report |
 | `history` | no | no | Lifetime totals, today's loss, recent sessions |
 
-Useful flags: `--venue sim|arcus`, `--markets BTC-USD,ETH-USD`, `--notional 25`,
-`--spread-bps 10`, `--duration 900`, `--volume-target 5000`, `--port 8080`, `--json`.
+Useful flags: `--venue sim|arcus`, `--network testnet|mainnet`,
+`--markets BTC-USD,ETH-USD`, `--notional 25`, `--capital 20`, `--capital-pct 50`,
+`--reserve 5`, `--spread-bps 10`, `--duration 900`, `--volume-target 5000`,
+`--max-drawdown 5`, `--port 8080`, `--json`.
+
+**The CLI cannot loosen a risk limit.** `--max-drawdown` and `--volume-target`
+are clamped to the configured value; passing a larger number prints a note and
+uses the configured one. Convenience flags must never become a bypass.
+
+---
+
+## 3b. Mainnet gate (`arcusbot/mainnet.py`)
+
+Live mainnet trading is refused unless **all** of these are true. They are
+AND-ed, read from the environment directly (so a malformed value is
+distinguishable from an unset one), and any unrecognised token denies:
+
+```bash
+ARCUS_NETWORK=mainnet
+BOT_MODE=live
+BOT_MAINNET_ENABLED=true
+BOT_MAINNET_CAPITAL_USD=20          # the hard cap, must be >0 and <= the ceiling
+BOT_MAINNET_ACK=i-understand-the-risk
+```
+
+* Ceiling is `BOT_MAINNET_MAX_CAPITAL_USD`, default **$100** — a fat-finger
+  guard, so `2000` is rejected rather than deployed.
+* When the gate opens, `apply_mainnet_limits` **tightens** risk limits to a
+  fraction of the cap (drawdown 15%, daily loss 20%, position 150%, inventory
+  100%) and never loosens a stricter operator setting. On a $20 cap the testnet
+  default `$25` drawdown would otherwise permit losing more than the account.
+* The cap is re-asserted on **every** capital re-size, so equity growth cannot
+  quietly raise deployed capital.
+* `--venue sim` and `--mode dry-run` are never gated.
 
 ---
 
@@ -192,7 +257,10 @@ outside them; sizing must respect the off-hours margin or you get
 
 ```
 cli.py         argument parsing, logging, command dispatch
-config.py      typed config from env/.env + validate()  <- refuses live-on-mainnet
+config.py      typed config from env/.env + validate()  <- consults the mainnet gate
+mainnet.py     fail-closed mainnet gate: conjunctive opt-in + hard capital cap
+selection.py   market ranking/veto: which markets this account can actually trade
+adaptive.py    per-market feedback control (edge + frequency multipliers)
 capital.py     budget -> clip/position/loss limits, reserves, mid-run re-sizing
 referral.py    referral links + $1B VIP milestone arithmetic
 session.py     durable state across restarts: lifetime totals, daily loss,
@@ -357,7 +425,9 @@ Shutdown is always `cancel-all -> flatten (reduce-only IOC, retried) -> report`.
 6. **Fills are idempotent by `tradeId`** — snapshot and stream overlap.
 7. **`net = realized + unrealized + funding + rebates − fees`** — asserted in
    `selftest` and `test_net_pnl_identity_includes_fees_and_rebates`.
-8. **Live mode on mainnet is refused** in `config.validate()`.
+8. **Mainnet live requires every opt-in in `mainnet.evaluate_gate`**, and the
+   capital cap is re-asserted on every re-size in `engine._resize_capital`. A
+   malformed env var can only ever *deny*, never enable. Tests: `test_mainnet.py`.
 9. **The reserve is never traded into** — it is both subtracted from the budget
    and enforced as the free-collateral floor.
 10. **Referral codes never enter an order payload.** Signup-time only.
@@ -368,8 +438,17 @@ Shutdown is always `cancel-all -> flatten (reduce-only IOC, retried) -> report`.
 13. **The required edge never falls below `BOT_MIN_EDGE_BPS`**, even at rebate
     tiers where the fee term goes negative. Quoting both sides at mid would
     maximise adverse selection.
+14. **An indeterminate place is never treated as "did not happen".** A 5xx or a
+    transport error sets `engine.needs_reconcile`, which blocks *opening* (never
+    closing) until exchange state is read back. Tests: `test_execution.py`.
+15. **The adaptive layer may widen the edge and slow the loop freely, but may
+    only speed up when demonstrably profitable** with benign flow, a healthy API
+    and no inventory pressure. It can never price below the fee floor.
+16. **Shutdown confirms rather than assumes.** After cancel + flatten the engine
+    re-reads account state and reports any residual position instead of exiting
+    quietly. (`engine._confirm_flat`)
 
-Run `python -m pytest tests -q` (172 tests, no network) after any change.
+Run `python -m pytest tests -q` (256 tests, no network) after any change.
 
 ---
 

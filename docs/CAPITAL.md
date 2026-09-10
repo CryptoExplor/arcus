@@ -155,6 +155,50 @@ actually at risk.
 
 ---
 
+## Account size drives how many markets you trade
+
+Capital does not just set the clip size — it decides how many markets the bot
+is *allowed* to touch. Spreading a small account across several markets is a
+quiet way to lose: each market needs room for a few clips, otherwise every fill
+is all-or-nothing and there is nothing left to average or scale out with.
+
+`selection.max_markets_for_capital` enforces this:
+
+| Deployable | Max markets | Why |
+| --- | --- | --- |
+| < $5 | 0 | Below the venue minimum notional — refuses to run |
+| $20 | **1** | Room for ~4 clips in one market, none in two |
+| $50 | 3 | |
+| $100 | 6 | |
+| $1,000+ | 8 | Capped: attention, subscriptions and rate-limit weight grow faster than the edge of the Nth-best market |
+
+On top of the count, `markets --rank` scores each candidate on spread,
+liquidity, volatility, affordability and tick granularity, and **vetoes** ones
+that cannot work — offline, no mark price, spread below the required edge, tick
+coarser than the edge, or a minimum clip that eats more than half the
+per-market budget. Asking for a market with `--markets` does not override a
+veto; it only narrows the universe.
+
+```bash
+python -m arcusbot markets --rank --capital 20
+# deployable $20 -> at most 1 market(s)
+# -> ETH-USD  0.406  ...
+# selected: ETH-USD
+```
+
+---
+
+## The $20 mainnet case
+
+`BOT_MAINNET_CAPITAL_USD` is a **separate, harder** limit from `BOT_CAPITAL_USD`.
+It is enforced by the risk engine on every allocation and re-size, and it
+tightens the loss limits to fractions of itself (drawdown 15%, daily loss 20%).
+See `docs/BOT_OPERATIONS.md` section 8. The general sizing knobs below still
+apply — the mainnet cap simply puts a ceiling under all of them that config
+cannot raise.
+
+---
+
 ## Recommended starting points
 
 **First live testnet run** — deliberately small:
