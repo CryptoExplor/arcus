@@ -20,7 +20,9 @@ Python 3.11+, stdlib-only except `cryptography` and `websockets`.
 > session has been run — the build environment cannot reach the API. All
 > results so far are from the offline simulator and the best of them
 > (**+0.82 bps ±2.06**) is statistically indistinguishable from zero.
-> Mainnet is **not** ready. See [`docs/VALIDATION.md`](docs/VALIDATION.md).
+> Mainnet is **not** ready. See [`docs/EVIDENCE_REPORT.md`](docs/EVIDENCE_REPORT.md)
+> for the full findings and [`docs/VALIDATION.md`](docs/VALIDATION.md) for the
+> protocol that must be run first.
 
 ## New here? Start with this
 
