@@ -302,6 +302,54 @@ except that you can tune a simulator.
 
 ---
 
+## 4b. What the latest measurements actually show
+
+Measured 2026-09-10 in the simulator, 3 seeds x 14s per configuration, after the
+adaptive layer and the multi-market inventory fix. **These are simulator
+numbers and they do not demonstrate profitability.**
+
+Default (hostile) flow — `SIM_UNINFORMED_RATE=0.25`:
+
+| Spread | Volume | Net bps | Stdev | Maker% | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 8 | $1,884 | **-0.88** | 2.86 | 87.3% | loses |
+| 14 | $1,658 | **-1.88** | 3.71 | 83.4% | loses |
+| 22 | $1,513 | **-0.50** | 1.40 | 84.3% | loses |
+
+Mixed flow — `SIM_UNINFORMED_RATE=0.7`:
+
+| Spread | Volume | Net bps | Stdev | Maker% | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 10 | $1,484 | **-3.23** | 4.59 | 75.9% | loses |
+| 16 | $1,852 | **+0.42** | 1.42 | 89.4% | **within noise** |
+
+Read this carefully. The single positive result, +0.42 bps, has a standard
+deviation of 1.42 across seeds — the error bar is more than three times the
+signal. **That is not evidence of an edge.** The honest summary is:
+
+* Against predominantly informed flow the strategy loses at every spread
+  tested. Adverse selection exceeds the captured spread. This is the expected
+  result for a pure maker with no directional model, and tuning the simulator
+  until it looks better would be self-deception.
+* Against mixed flow with a wide (16 bps) spread it is approximately
+  **break-even**, which is the stated objective — volume that pays for itself.
+* Maker share is consistently 84–93%, so the fee side is working as designed.
+
+The practical conclusion: **the spread must be wide, and the flow must not be
+predominantly informed.** Neither is something the bot controls, which is
+precisely why the mainnet capital cap exists and why testnet must demonstrate a
+positive `netBpsOfVolume` over days — not one 14-second sample — before real
+money is committed.
+
+Reproduce with:
+
+```bash
+python -m arcusbot sweep --sweep-spreads 8,14,22 --sweep-seeds 3 --sweep-duration 14
+SIM_UNINFORMED_RATE=0.7 python -m arcusbot sweep --sweep-spreads 10,16 --sweep-seeds 3
+```
+
+---
+
 ## 5. Applying this on real testnet
 
 The sim gives you a *starting* spread, not a validated one. Repeat the

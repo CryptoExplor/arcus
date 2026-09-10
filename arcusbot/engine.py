@@ -551,6 +551,12 @@ class Engine:
             self.orders_sent += 1
             self.risk.note_order()
             self.risk.note_success()
+            # Fill rate is fills/quotes, so opening quotes must be counted here
+            # or the ratio is permanently zero and the adaptive layer can never
+            # conclude that quoting is working.
+            ctl = self.adaptive.get(intent.market)
+            if ctl is not None and not intent.reduce_only:
+                ctl.note_quote()
             status = str(resp.get("status", "")).upper()
             if status == "REJECTED":
                 self.rejects += 1
@@ -986,11 +992,11 @@ class Engine:
 
         inventory = sum((abs(D(m.get("position", 0))) * D(m.get("mid") or 0)
                          for m in (w.snapshot() for w in self.workers.values())), Decimal(0))
-        if (self.cfg.max_inventory_notional_usd > 0
-                and inventory > self.cfg.max_inventory_notional_usd):
+        inventory_cap = self.cfg.max_inventory_notional_usd * max(len(self.workers), 1)
+        if inventory_cap > 0 and inventory > inventory_cap:
             states.append(("OVEREXPOSED",
                            f"inventory ${_m(inventory)} over the "
-                           f"${_m(self.cfg.max_inventory_notional_usd)} cap"))
+                           f"${_m(inventory_cap)} portfolio cap"))
 
         stuck_for = time.time() - (self.last_fill_at or self.started_at)
         if volume <= 0 and stuck_for > 120:

@@ -261,9 +261,18 @@ class RiskManager:
              for name, b in self.pnl.books.items()),
             Decimal(0),
         )
-        if inventory_usd > self.cfg.max_inventory_notional_usd:
+        # BOT_MAX_INVENTORY_NOTIONAL_USD is a PER-MARKET cap (that is how
+        # strategy.py applies it), so the portfolio-wide ceiling scales with the
+        # number of markets. Comparing the summed inventory against the
+        # per-market number would leave a multi-market bot permanently in
+        # FLATTEN, unable to quote and slowly bleeding the spread.
+        total_inventory_cap = self.cfg.max_inventory_notional_usd * max(
+            len(self.cfg.markets), 1)
+        if inventory_usd > total_inventory_cap:
             verdict.state = FLATTEN
-            verdict.reasons.append(f"inventory ${dec_str(inventory_usd)} over soft cap")
+            verdict.reasons.append(
+                f"inventory ${dec_str(inventory_usd)} over the ${dec_str(total_inventory_cap)} "
+                f"portfolio cap")
 
         if now < self.throttle_until and verdict.state == OK:
             verdict.state = THROTTLE

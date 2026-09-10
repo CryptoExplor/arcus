@@ -285,3 +285,62 @@ def test_restart_does_not_reset_loss_protection(tmp_path: Path) -> None:
         "a restart must not wipe today's booked loss"
     assert reloaded.risk.peak_net_pnl_usd == Decimal("12"), \
         "the drawdown high-water mark must survive a restart"
+
+
+# ------------------------------------------------ multi-market inventory cap --
+
+
+def test_inventory_cap_is_per_market_not_portfolio_wide(tmp_path: Path) -> None:
+    """Regression: risk summed all markets against the per-market cap.
+
+    With two markets each holding just under the cap, the bot was permanently
+    in FLATTEN — unable to quote, slowly paying the spread to unwind.
+    """
+    from arcusbot.risk import OK, RiskManager
+
+    cfg = Config.from_env(venue="sim", markets=["BTC-USD", "ETH-USD"],
+                          state_dir=tmp_path, persist_state=False,
+                          max_inventory_notional_usd=Decimal("75"))
+    pnl = PnLTracker()
+    risk = RiskManager(cfg, pnl)
+    # $60 in each market: under the per-market cap, over the naive sum.
+    for i, (market, price) in enumerate([("BTC-USD", "60000"), ("ETH-USD", "3000")]):
+        pnl.record_fill(Fill(trade_id=f"inv-{i}", market=market, side="BUY",
+                             price=Decimal(price),
+                             size=Decimal("60") / Decimal(price),
+                             liquidity="MAKER", fee=Decimal("0"), ts=time.time()))
+    pnl.set_marks({"BTC-USD": Decimal("60000"), "ETH-USD": Decimal("3000")})
+    assert risk.evaluate().state == OK, "two markets at $60 each must not trip a $75/market cap"
+
+
+def test_portfolio_inventory_cap_still_trips_when_genuinely_over(tmp_path: Path) -> None:
+    from arcusbot.risk import FLATTEN, RiskManager
+
+    cfg = Config.from_env(venue="sim", markets=["BTC-USD", "ETH-USD"],
+                          state_dir=tmp_path, persist_state=False,
+                          max_inventory_notional_usd=Decimal("75"))
+    pnl = PnLTracker()
+    risk = RiskManager(cfg, pnl)
+    pnl.record_fill(Fill(trade_id="big", market="BTC-USD", side="BUY",
+                         price=Decimal("60000"), size=Decimal("0.01"),
+                         liquidity="MAKER", fee=Decimal("0"), ts=time.time()))
+    pnl.set_marks({"BTC-USD": Decimal("60000")})  # $600 >> 2 x $75
+    assert risk.evaluate().state == FLATTEN
+
+
+def test_opening_quotes_are_counted_for_the_fill_rate(tmp_path: Path) -> None:
+    """Regression: note_quote was never called, pinning fill rate at 0."""
+    eng = make_engine(tmp_path, venue="sim", mode="dry-run")
+    eng.sim = None
+    ctl = eng.adaptive.setdefault("BTC-USD", __import__(
+        "arcusbot.adaptive", fromlist=["AdaptiveController"]
+    ).AdaptiveController(market="BTC-USD"))
+
+    class FakeSim:
+        def place(self, *a, **k):
+            return {"status": "OPEN", "orderId": "1"}
+
+    eng.sim = FakeSim()
+    eng.cfg.venue = "sim"
+    asyncio.run(eng._do_place(eng.workers["BTC-USD"], intent("q0001abcdef")))
+    assert ctl.quotes_placed == 1, "an opening quote must be counted"
