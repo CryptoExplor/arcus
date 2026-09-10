@@ -143,13 +143,24 @@ class VipProgress:
 
 
 def vip_progress(pnl_snapshot: dict[str, Any],
-                 target_usd: Decimal = VIP_VOLUME_TARGET_USD) -> VipProgress:
+                 target_usd: Decimal = VIP_VOLUME_TARGET_USD,
+                 lifetime_volume_usd: Decimal | None = None) -> VipProgress:
+    """Progress toward VIP.
+
+    ``lifetime_volume_usd`` (from the persisted session store) is used when
+    available: the milestone is a lifetime figure, so counting only the current
+    process would understate it and permanently mis-state the ETA.
+    """
     def _d(key: str) -> Decimal:
         raw = pnl_snapshot.get(key)
         return Decimal(str(raw)) if raw not in (None, "") else Decimal(0)
 
+    session_volume = _d("volumeUsd")
+    volume = session_volume if lifetime_volume_usd is None else (
+        lifetime_volume_usd + session_volume
+    )
     return VipProgress(
-        volume_usd=_d("volumeUsd"),
+        volume_usd=volume,
         target_usd=target_usd,
         volume_per_hour_usd=_d("volumePerHourUsd"),
         net_bps_of_volume=_d("netBpsOfVolume"),

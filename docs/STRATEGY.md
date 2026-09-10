@@ -142,6 +142,35 @@ from −4.82 to −3.26 bps in one change. They are separate clocks.
 
 ---
 
+## 3b. Fee tiers change the economics, not just the cost
+
+Fees are tiered on trailing 30-day volume. The bot reads them live and reports
+how far the next tier is and what it is worth:
+
+```
+next fee tier VIP1 at $1000000 volume (0.03% there): saves 2 bps per round trip
+```
+
+`savingBpsPerRoundTrip` is the concrete prize — how much cheaper a maker/maker
+cycle becomes — which is what decides whether pushing for the next tier is
+worth the volume it costs to get there.
+
+At high tiers **maker fees go negative**: you are paid to rest liquidity. That
+inverts the arithmetic. `round_trip_bps()` legitimately returns a negative
+number, and the code must not clamp it to zero — a rebate is real income and
+correctly lowers the spread the quoter needs.
+
+But it must not lower it to *nothing*. With fees at −1 bps round trip and a
+zero buffer, the fee-derived floor becomes negative, and a naive quoter would
+post both sides at mid: maximum fill rate, zero edge, maximum adverse
+selection. **`BOT_MIN_EDGE_BPS` (default 1) is the absolute floor that survives
+any tier.** The relevant test is
+`test_rebate_tier_never_drops_the_edge_to_zero`.
+
+The practical consequence: the edge widens as you climb tiers, so a spread that
+is marginal at Base may be comfortably profitable at VIP1. Re-measure after a
+tier change rather than assuming the old setting still holds.
+
 ## 4. Measuring the edge honestly
 
 ### The simulator's job

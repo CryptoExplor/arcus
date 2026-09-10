@@ -71,6 +71,7 @@ async def _one_run(base: Config, spread: float, seed: int, duration: int) -> dic
         log_level="CRITICAL",
         cancel_all_on_exit=True,
         print_summary=False,
+        persist_state=False,   # sweeps must never touch real risk state
     )
     engine = Engine(cfg)
     await engine.run()

@@ -147,9 +147,16 @@ class Config:
     referral_mainnet: str = DEFAULT_REFERRAL_MAINNET
     show_referral: bool = True
 
+    # ----------------------------------------------------------- persistence --
+    # Carry drawdown/daily-loss/lifetime-volume across restarts so a crash loop
+    # cannot reset the kill switch. Disable for sweeps, backtests and CI.
+    persist_state: bool = True
+    carry_drawdown: bool = True      # restored peak PnL counts toward the limit
+    max_restart_crashes: int = 0     # >0: refuse to start after N dirty exits
+
     # ------------------------------------------------------------- quoting --
     spread_bps: Decimal = Decimal("10")      # target round-trip edge (maker); see docs/STRATEGY.md
-    min_edge_bps: Decimal = Decimal("0")     # refuse to quote below fee+this
+    min_edge_bps: Decimal = Decimal("1")     # absolute spread floor, survives rebate tiers
     join_bbo: bool = True                    # ALO at/inside BBO
     requote_bps: Decimal = Decimal("2")      # re-quote when quote drifts this far
     requote_interval_s: float = 1.5
@@ -265,8 +272,11 @@ class Config:
             referral_testnet=str(_env("ARCUS_REFERRAL_TESTNET", DEFAULT_REFERRAL_TESTNET)),
             referral_mainnet=str(_env("ARCUS_REFERRAL_MAINNET", DEFAULT_REFERRAL_MAINNET)),
             show_referral=_bool("BOT_SHOW_REFERRAL", True),
+            persist_state=_bool("BOT_PERSIST_STATE", True),
+            carry_drawdown=_bool("RISK_CARRY_DRAWDOWN", True),
+            max_restart_crashes=_int("RISK_MAX_RESTART_CRASHES", 0),
             spread_bps=_dec("BOT_SPREAD_BPS", "10"),
-            min_edge_bps=_dec("BOT_MIN_EDGE_BPS", "0"),
+            min_edge_bps=_dec("BOT_MIN_EDGE_BPS", "1"),
             join_bbo=_bool("BOT_JOIN_BBO", True),
             requote_bps=_dec("BOT_REQUOTE_BPS", "2"),
             requote_interval_s=_float("BOT_REQUOTE_INTERVAL_S", 1.5),

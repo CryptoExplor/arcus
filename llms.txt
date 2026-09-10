@@ -74,6 +74,7 @@ at <https://testnet.arcus.xyz/api-keys>, or scripted via `tools/onboard.py`.
 | `run --mode dry-run` | read-only | no | Full loop, logs intents instead of signing |
 | `run --mode live` | yes | **yes** | Real signed orders |
 | `report` | no | no | Reprint the last session's PnL report |
+| `history` | no | no | Lifetime totals, today's loss, recent sessions |
 
 Useful flags: `--venue sim|arcus`, `--markets BTC-USD,ETH-USD`, `--notional 25`,
 `--spread-bps 10`, `--duration 900`, `--volume-target 5000`, `--port 8080`, `--json`.
@@ -194,6 +195,8 @@ cli.py         argument parsing, logging, command dispatch
 config.py      typed config from env/.env + validate()  <- refuses live-on-mainnet
 capital.py     budget -> clip/position/loss limits, reserves, mid-run re-sizing
 referral.py    referral links + $1B VIP milestone arithmetic
+session.py     durable state across restarts: lifetime totals, daily loss,
+               drawdown baseline, crash-loop breaker
 signing.py     Ed25519, Scheme 1 typed payloads, Scheme 2 legacy
 scaling.py     decimal <-> ticks/quantums, tier-aware snapping, slippage clamp
 rest.py        signed REST client + client-side IP weight budget
@@ -291,6 +294,32 @@ actually matters — `projectedPnlAtTargetUsd = remaining × netBps / 10_000`.
 At a negative edge that is a large negative number, which is the honest signal
 that chasing the milestone costs money. Do not present VIP progress without it.
 
+## 6d. State across restarts
+
+`session.py` persists what a process lifetime would otherwise forget:
+lifetime volume/fees/PnL, the UTC-day loss, the drawdown high-water mark and a
+count of consecutive unclean exits. Written atomically to
+`state/session.json` on shutdown, reloaded on boot.
+
+Why it matters: **a bot that forgets its losses on restart has no risk limits.**
+Halt on a $25 drawdown, get restarted by a supervisor, lose $25 again — every
+session reports itself healthy while the account bleeds.
+
+Rules:
+
+- **Daily loss carries.** `RiskManager.effective_daily_loss()` = this session's
+  loss + what was already booked today. Past the limit the bot refuses to start.
+- **Drawdown is measured from the all-time peak** when `RISK_CARRY_DRAWDOWN` is
+  on (default) — drawdown is a property of the account, not a process.
+- **Open positions are NOT persisted.** The exchange is the authority on
+  inventory; a stored belief that contradicts the venue is worse than no belief.
+- **Corruption is survivable** — quarantine to `session.corrupt`, start fresh,
+  warn. Never refuse to run because of a bad state file.
+- **Diagnostics must not mutate it.** `selftest` and `sweep` force
+  `persist_state=false`.
+- Clean exits (runtime limit, volume target, signal, cancellation) reset the
+  crash counter; anything else increments it.
+
 ## 7. Risk model
 
 Per order (`risk.check_order`): market ONLINE, min notional, max order size,
@@ -334,8 +363,13 @@ Shutdown is always `cancel-all -> flatten (reduce-only IOC, retried) -> report`.
 10. **Referral codes never enter an order payload.** Signup-time only.
 11. **`.env` is gitignored and never committed**; `.env.example` carries the
     same keys with no secrets.
+12. **Risk state survives restarts.** Daily loss and drawdown carry over; a
+    restart must never hand back a spent loss budget.
+13. **The required edge never falls below `BOT_MIN_EDGE_BPS`**, even at rebate
+    tiers where the fee term goes negative. Quoting both sides at mid would
+    maximise adverse selection.
 
-Run `python -m pytest tests -q` (130 tests, no network) after any change.
+Run `python -m pytest tests -q` (172 tests, no network) after any change.
 
 ---
 
@@ -362,6 +396,10 @@ Full list in `.env.example`. The ones that change behaviour most:
 | `RISK_MIN_FREE_COLLATERAL_USD` | `50` | flatten-only floor |
 | `BOT_VOLUME_TARGET_USD` | `0` | stop after this much volume (0 = unlimited) |
 | `BOT_METRICS_PORT` | `0` | dashboard port (0 = off) |
+| `BOT_MIN_EDGE_BPS` | `1` | absolute spread floor; survives rebate tiers |
+| `BOT_PERSIST_STATE` | `true` | carry risk state across restarts |
+| `RISK_CARRY_DRAWDOWN` | `true` | drawdown measured from the all-time peak |
+| `RISK_MAX_RESTART_CRASHES` | `0` | `>0` refuses to start after N unclean exits |
 
 ---
 
@@ -409,4 +447,5 @@ normal and free), `ipBudget.tokens` not pinned at 0.
 - Fund testnet: <https://docs.arcus.xyz/guides/fund-testnet-account>
 - In-repo: `README.md` (setup), `docs/BOT_OPERATIONS.md` (runbook),
   `docs/ARCUS_PLATFORM.md` (venue reference), `docs/STRATEGY.md` (the economics),
-  `docs/CAPITAL.md` (budget -> sizing), `.env.example` (every config key).
+  `docs/CAPITAL.md` (budget -> sizing), `docs/PERSISTENCE.md` (state across
+  restarts), `.env.example` (every config key).

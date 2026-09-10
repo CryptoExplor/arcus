@@ -88,9 +88,20 @@ footer a:hover{text-decoration:underline}
   <div class="card"><h2>Fees &amp; connectivity</h2>
     <div class="kv"><span>tier</span><span id="tier">-</span></div>
     <div class="kv"><span>maker / taker</span><span id="mt">-</span></div>
+    <div class="kv"><span>next tier</span><span id="ntier">-</span></div>
+    <div class="kv"><span>next tier saves</span><span id="nsave">-</span></div>
     <div class="kv"><span>ws connected</span><span id="wsc">-</span></div>
     <div class="kv"><span>ws reconnects</span><span id="wsr">-</span></div>
     <div class="kv"><span>ip weight left</span><span id="ipb">-</span></div>
+  </div>
+  <div class="card"><h2>Lifetime (across restarts)</h2>
+    <div class="big" id="ltvol">-</div>
+    <div class="kv"><span>sessions / fills</span><span id="ltsess">-</span></div>
+    <div class="kv"><span>net PnL</span><span id="ltnet">-</span></div>
+    <div class="kv"><span>net bps of volume</span><span id="ltbps">-</span></div>
+    <div class="kv"><span>today's loss</span><span id="dayloss">-</span></div>
+    <div class="kv"><span>drawdown carried</span><span id="ddcarry">-</span></div>
+    <div class="kv"><span>unclean exits</span><span id="crashes">-</span></div>
   </div>
   <div class="card"><h2>Capital</h2>
     <div class="big" id="deployed">-</div>
@@ -150,7 +161,25 @@ async function tick(){
   document.getElementById('rej').textContent=s.rejects+' ('+Object.entries(r.rejections||{}).map(([k,v])=>k+':'+v).join(', ')+')';
   document.getElementById('reasons').textContent=(r.reasons||[]).join('; ')||(r.haltReason||'none');
   document.getElementById('tier').textContent=p.fees.level+' '+p.fees.name+' ('+p.fees.source+')';
-  document.getElementById('mt').textContent=p.fees.maker_bps+' / '+p.fees.taker_bps+' bps';
+  const mt=document.getElementById('mt');
+  mt.textContent=p.fees.maker_bps+' / '+p.fees.taker_bps+' bps'+(p.fees.maker_is_rebate?' (rebate)':'');
+  mt.className=p.fees.maker_is_rebate?'good':'';
+  const nt=p.fees.next_tier;
+  document.getElementById('ntier').textContent=nt?(nt.name+' — '+f(nt.pctComplete,1)+'%, $'+f(nt.remainingVolumeUsd,0)+' to go'):'top tier';
+  document.getElementById('nsave').textContent=nt?(nt.savingBpsPerRoundTrip+' bps/round trip'+(nt.unlocksMakerRebate?' + rebates':'')):'-';
+  const ss=s.session;
+  if(ss){
+    document.getElementById('ltvol').textContent='$'+f(ss.lifetime.volumeUsd,2);
+    document.getElementById('ltsess').textContent=ss.lifetime.sessions+' / '+ss.lifetime.fills;
+    const ln=document.getElementById('ltnet');
+    ln.textContent=money(ss.lifetime.netPnlUsd);ln.className=cls(ss.lifetime.netPnlUsd);
+    const lb=document.getElementById('ltbps');
+    lb.textContent=f(ss.lifetime.netBpsOfVolume,3)+' bps';lb.className=cls(ss.lifetime.netBpsOfVolume);
+    document.getElementById('dayloss').textContent=money(ss.day.lossSoFarUsd);
+    document.getElementById('ddcarry').textContent=money(r.carriedDrawdown);
+    const cr=document.getElementById('crashes');
+    cr.textContent=ss.risk.consecutiveCrashes;cr.className=Number(ss.risk.consecutiveCrashes)>0?'warn':'';
+  }
   document.getElementById('wsc').textContent=s.ws?(s.ws.connected?'yes':'no'):'n/a';
   document.getElementById('wsr').textContent=s.ws?s.ws.reconnects:'-';
   document.getElementById('ipb').textContent=f(s.ipBudget.tokens,0)+' / '+f(s.ipBudget.capacity,0);

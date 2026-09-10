@@ -9,6 +9,7 @@ markets    list tradable markets with tick/step/limits
 quote      show the quotes the strategy *would* place right now (no orders)
 report     print/refresh the latest PnL report
 selftest   run the offline simulator for N seconds and assert the invariants
+history    cumulative state across restarts (lifetime volume, today, sessions)
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from .engine import Engine
 from .pnl import FeeSchedule
 from .referral import all_referral_links, banner
 from .rest import ArcusError, ArcusREST
+from .session import SessionStore
 from .scaling import dec_str
 from .signing import Signer
 from .sim import SIM_FEE_TIERS
@@ -51,7 +53,8 @@ def setup_logging(cfg: Config) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m arcusbot", description="Arcus testnet trading bot")
     p.add_argument("command",
-                   choices=["run", "preflight", "markets", "quote", "report", "selftest", "sweep"])
+                   choices=["run", "preflight", "markets", "quote", "report",
+                            "selftest", "sweep", "history"])
     p.add_argument("--venue", choices=["arcus", "sim"], help="arcus (real API) or sim (offline)")
     p.add_argument("--mode", choices=["dry-run", "live"], help="dry-run signs nothing, live sends orders")
     p.add_argument("--strategy", choices=["volume-maker", "ping-pong", "spot-rfq"])
@@ -282,6 +285,51 @@ async def cmd_quote(cfg: Config, as_json: bool) -> int:
     return 0
 
 
+def cmd_history(cfg: Config, as_json: bool) -> int:
+    """Cumulative state across restarts: lifetime totals, today, recent runs."""
+    store = SessionStore(cfg.state_dir / "session.json", enabled=True).load()
+    if as_json:
+        print(json.dumps({**store.snapshot(), "sessions": store.history}, indent=2))
+        return 0
+
+    if not store.loaded_from_disk:
+        print(f"no persisted state at {store.path}")
+        print("(it is written when a run finishes; BOT_PERSIST_STATE=false disables it)")
+        return 1
+
+    s = store.snapshot()
+    lt, day, risk = s["lifetime"], s["day"], s["risk"]
+    print(f"\nLifetime (since {lt['firstSeen']})")
+    print("-" * 72)
+    print(f"  sessions      {lt['sessions']}   fills {lt['fills']}")
+    print(f"  volume        ${lt['volumeUsd']}  (maker ${lt['makerVolumeUsd']})")
+    print(f"  fees paid     ${lt['feesPaidUsd']}   rebates ${lt['rebatesUsd']}")
+    print(f"  net PnL       ${lt['netPnlUsd']}  ({lt['netBpsOfVolume']} bps of volume)")
+    print(f"\nToday ({day['day']} UTC)")
+    print("-" * 72)
+    print(f"  volume        ${day['volumeUsd']}")
+    print(f"  net PnL       ${day['netPnlUsd']}")
+    print(f"  loss so far   ${day['lossSoFarUsd']} of ${dec_str(cfg.max_daily_loss_usd)} limit")
+    print("\nRisk carry-over")
+    print("-" * 72)
+    print(f"  peak net PnL  ${risk['peakNetPnlUsd']}")
+    print(f"  peak equity   ${risk['peakEquityUsd']}")
+    print(f"  unclean exits {risk['consecutiveCrashes']}  last: {risk['lastExitReason'] or '-'}")
+
+    if store.history:
+        print("\nRecent sessions")
+        print("-" * 72)
+        print(f"  {'session':<18} {'volume':>12} {'net':>10} {'bps':>8}  exit")
+        for row in store.history[-12:]:
+            print(f"  {str(row.get('sessionId','?')):<18} "
+                  f"{str(row.get('volumeUsd','-')):>12} "
+                  f"{str(row.get('netPnl','-')):>10} "
+                  f"{str(row.get('netBpsOfVolume','-')):>8}  "
+                  f"{str(row.get('exitReason', row.get('status','?')))[:34]}")
+    print()
+    return 0
+
+
 def cmd_report(cfg: Config, as_json: bool) -> int:
     path = cfg.state_dir / "report-latest.json"
     if not path.is_file():
@@ -309,6 +357,8 @@ async def cmd_selftest(cfg: Config) -> int:
     cfg.mode = "live"          # 'live' against the simulator = orders really match
     cfg.max_runtime_s = cfg.max_runtime_s or 45
     cfg.report_interval_s = 10
+    # A diagnostic must not mutate the risk state that guards real trading.
+    cfg.persist_state = False
     engine = Engine(cfg)
     await engine.run()
 
@@ -372,6 +422,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_preflight(cfg, args.json)
     if args.command == "markets":
         return cmd_markets(cfg, args.json)
+    if args.command == "history":
+        return cmd_history(cfg, args.json)
     if args.command == "report":
         return cmd_report(cfg, args.json)
     if args.command == "quote":

@@ -35,6 +35,7 @@ from .config import Config
 from .pnl import FeeSchedule, Fill, PnLTracker, fills_from_ws
 from .referral import all_referral_links, banner, vip_progress
 from .rest import ArcusError, ArcusREST
+from .session import SessionStore
 from .risk import FLATTEN, HALT, OK, RiskManager
 from .scaling import D, dec_str
 from .signing import Signer
@@ -53,7 +54,9 @@ class Engine:
         self.ws: ArcusWS | None = None
         self.sim: SimExchange | None = None
         self.pnl = PnLTracker(journal_path=cfg.state_dir / "fills.jsonl")
-        self.risk = RiskManager(cfg, self.pnl)
+        self.session = SessionStore(cfg.state_dir / "session.json",
+                                    enabled=cfg.persist_state).load()
+        self.risk = RiskManager(cfg, self.pnl, self.session)
         self.workers: dict[str, MarketWorker] = {}
         self.states: dict[str, MarketState] = {}
         self.spot = SpotVolumeStrategy(cfg, self.pnl)
@@ -79,7 +82,10 @@ class Engine:
 
     def _load_fees(self) -> FeeSchedule:
         if self.cfg.venue == "sim":
-            return FeeSchedule.from_fee_tiers(SIM_FEE_TIERS)
+            # Offline, the only volume history that exists is our own, so the
+            # simulator can still exercise tier progression across restarts.
+            return FeeSchedule.from_fee_tiers(SIM_FEE_TIERS,
+                                              self.session.lifetime.volume_usd)
         try:
             volume = None
             try:
@@ -90,6 +96,12 @@ class Engine:
                         break
             except ArcusError:
                 pass
+            if volume is None and self.session.lifetime.volume_usd > 0:
+                # The exchange is authoritative; fall back to our own tally only
+                # when it will not answer.
+                volume = self.session.lifetime.volume_usd
+                log.info("using locally tracked volume $%s for the fee tier estimate",
+                         dec_str(volume))
             return FeeSchedule.from_fee_tiers(self.rest.fee_tiers(), volume)
         except ArcusError as exc:
             log.warning("fee tier fetch failed (%s); using conservative defaults", exc)
@@ -106,8 +118,30 @@ class Engine:
             self.pnl.fees.level, self.pnl.fees.name,
             dec_str(self.pnl.fees.maker_bps), dec_str(self.pnl.fees.taker_bps), self.pnl.fees.source,
         )
+        if self.pnl.fees.maker_is_rebate:
+            log.info("maker fees are a REBATE at this tier — resting both legs earns money")
+        progress = self.pnl.fees.next_tier_progress()
+        if progress:
+            log.info("next fee tier %s at $%s volume (%s%% there): saves %s bps per "
+                     "round trip%s",
+                     progress["name"], progress["volumeThresholdUsd"],
+                     progress["pctComplete"], progress["savingBpsPerRoundTrip"],
+                     " and unlocks maker rebates" if progress["unlocksMakerRebate"] else "")
+
         required = self.pnl.edge_required_bps(self.cfg.fee_buffer_bps, maker_legs=2)
         log.info("required round-trip edge: %s bps (maker/maker) — quoting at >= this", dec_str(required))
+
+        if self.session.loaded_from_disk:
+            log.info("restored state — %s", self.session.describe())
+            if self.risk.carried_daily_loss > 0:
+                log.warning("carrying $%s of loss already booked today toward the "
+                            "$%s daily limit",
+                            dec_str(self.risk.carried_daily_loss),
+                            dec_str(self.cfg.max_daily_loss_usd))
+            if self.session.risk.consecutive_crashes:
+                log.warning("%d consecutive unclean exit(s); last: %s",
+                            self.session.risk.consecutive_crashes,
+                            self.session.risk.last_exit_reason or "unknown")
 
         wanted = [m for m in self.cfg.markets if m in markets]
         missing = [m for m in self.cfg.markets if m not in markets]
@@ -136,6 +170,14 @@ class Engine:
             self.risk.note_account(self.sim.account())
 
         self._resize_capital(initial=True)
+
+        self.session.start_session(self.pnl.session_id, {
+            "venue": self.cfg.venue,
+            "mode": self.cfg.mode,
+            "strategy": self.cfg.strategy,
+            "markets": ",".join(wanted),
+        })
+        self.session.save()
 
         log.info("engine ready: venue=%s mode=%s strategy=%s markets=%s",
                  self.cfg.venue, self.cfg.mode, self.cfg.strategy, ",".join(wanted))
@@ -577,6 +619,15 @@ class Engine:
             await self._flatten_everything()
         if self.ws:
             await self.ws.stop()
+
+        # Fold this run into the durable totals BEFORE writing the report, so a
+        # crash between the two loses the report rather than the risk state.
+        snapshot = self.pnl.snapshot()
+        self.session.risk.peak_net_pnl_usd = max(
+            self.session.risk.peak_net_pnl_usd, self.pnl.peak_net)
+        self.session.note_equity(self.risk.equity)
+        self.session.finish_session(self.pnl.session_id, snapshot, self.exit_reason)
+
         self.write_state()
         report = self.pnl.write_report(self.cfg.state_dir / f"report-{self.pnl.session_id}.json")
         latest = self.cfg.state_dir / "report-latest.json"
@@ -586,7 +637,10 @@ class Engine:
             print(self.pnl.text_report())
             if self.allocation is not None and self.allocation.mode == "capital":
                 print(self.allocation.describe())
-            print(vip_progress(self.pnl.snapshot()).describe())
+            print(vip_progress(self.pnl.snapshot(),
+                               lifetime_volume_usd=self.session.lifetime.volume_usd).describe())
+            if self.session.enabled and self.session.lifetime.sessions > 1:
+                print(self.session.describe())
             print(f"exit reason : {self.exit_reason}")
             print(f"report      : {report}")
             print("=" * 72)
@@ -668,7 +722,9 @@ class Engine:
             "pnl": pnl_snapshot,
             "capital": self.allocation.as_dict() if self.allocation else None,
             "capitalResizes": self.resizes,
-            "vip": vip_progress(pnl_snapshot).as_dict(),
+            "vip": vip_progress(pnl_snapshot,
+                                lifetime_volume_usd=self.session.lifetime.volume_usd).as_dict(),
+            "session": self.session.snapshot(),
             "referral": all_referral_links(self.cfg) if self.cfg.show_referral else {},
             "markets": [w.snapshot() for w in self.workers.values()],
             "ws": self.ws.health() if self.ws else None,

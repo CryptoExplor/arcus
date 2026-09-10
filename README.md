@@ -85,6 +85,7 @@ Details in [`docs/CAPITAL.md`](docs/CAPITAL.md).
 | `run --mode dry-run` | read-only | no | Full loop, logs intents |
 | `run --mode live` | yes | **yes** | The real thing |
 | `report` | none | no | Reprint the last session's PnL |
+| `history` | none | no | Lifetime totals, today's loss, recent sessions |
 
 Flags: `--venue sim|arcus`, `--markets`, `--notional`, `--spread-bps`,
 `--duration`, `--volume-target`, `--port`, `--json`.
@@ -123,6 +124,31 @@ modelling bugs that initially inverted this conclusion, and the tuning procedure
 are in [`docs/STRATEGY.md`](docs/STRATEGY.md).
 
 ---
+
+## State that survives restarts
+
+A bot that forgets its losses on restart has no risk limits. Halt on a $25
+drawdown, get restarted by `systemd`, lose $25 again — every session reports
+itself healthy while the account bleeds.
+
+So lifetime volume, today's loss and the drawdown baseline persist to
+`state/session.json` and are reloaded on boot:
+
+```
+carrying $38.05 of loss already booked today toward the $40 daily limit
+```
+
+Past the limit the bot **refuses to start** rather than spending it twice. The
+daily counter rolls at UTC midnight; lifetime totals do not. Open positions are
+deliberately *not* persisted — the exchange is the authority on inventory.
+
+```bash
+python -m arcusbot history        # lifetime, today, recent sessions
+```
+
+`RISK_MAX_RESTART_CRASHES=3` adds a circuit breaker that refuses to start after
+three unclean exits in a row. Details in
+[`docs/PERSISTENCE.md`](docs/PERSISTENCE.md).
 
 ## Monitoring
 
@@ -165,12 +191,13 @@ affects execution. Forking? Put your own codes in `ARCUS_REFERRAL_TESTNET` /
 ## Layout
 
 ```
-arcusbot/    signing scaling config capital referral rest ws book pnl risk
-             strategy sim sweep engine dashboard cli
+arcusbot/    signing scaling config capital referral session rest ws book pnl
+             risk strategy sim sweep engine dashboard cli
 tools/       onboard.py (API key registration), fund_testnet.py (on-chain deposit)
-tests/       130 offline tests — signing, tick math, PnL identity, risk,
-             capital, referral, .env parsing
-docs/        BOT_OPERATIONS.md · ARCUS_PLATFORM.md · STRATEGY.md · CAPITAL.md
+tests/       172 offline tests — signing, tick math, PnL identity, risk,
+             capital, referral, persistence, fee tiers, .env parsing
+docs/        BOT_OPERATIONS.md · ARCUS_PLATFORM.md · STRATEGY.md
+             CAPITAL.md · PERSISTENCE.md
 llms.txt     single-file agent guide to the bot and the venue
 .env.example template for .env (which is gitignored)
 ```
@@ -184,6 +211,7 @@ llms.txt     single-file agent guide to the bot and the venue
 | [`docs/ARCUS_PLATFORM.md`](docs/ARCUS_PLATFORM.md) | Venue reference: auth schemes, order rules, rate limits, channels |
 | [`docs/STRATEGY.md`](docs/STRATEGY.md) | The economics, the failure modes, and how the edge was measured |
 | [`docs/CAPITAL.md`](docs/CAPITAL.md) | Budget → order sizing, reserves, re-sizing, guard rails |
+| [`docs/PERSISTENCE.md`](docs/PERSISTENCE.md) | State across restarts, loss carry-over, crash-loop breaker |
 
 ---
 
@@ -198,4 +226,4 @@ llms.txt     single-file agent guide to the bot and the venue
   Set `RISK_DEAD_MANS_SWITCH_S` for unattended runs.
 - Testnet contract addresses change on every redeploy; verify before funding.
 
-Run `.venv/bin/python -m pytest tests -q` (130 tests, no network) after any change.
+Run `.venv/bin/python -m pytest tests -q` (172 tests, no network) after any change.

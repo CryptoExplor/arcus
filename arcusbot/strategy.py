@@ -140,7 +140,16 @@ class MarketWorker:
         ]
 
     def required_edge_bps(self, maker_legs: int = 2) -> Decimal:
-        return self.pnl.edge_required_bps(self.cfg.fee_buffer_bps, maker_legs=maker_legs)
+        """Fee-derived floor, never below the operator's absolute minimum.
+
+        At rebate tiers the fee term goes negative — resting both legs earns
+        money — which correctly lowers the spread we need. But it must not
+        collapse to zero: quoting both sides at mid would cross our own book,
+        maximise adverse selection and hand the spread to whoever is informed.
+        ``BOT_MIN_EDGE_BPS`` is the hard floor that survives any tier.
+        """
+        fee_edge = self.pnl.edge_required_bps(self.cfg.fee_buffer_bps, maker_legs=maker_legs)
+        return max(fee_edge, self.cfg.min_edge_bps)
 
     def target_size(self, price: Decimal) -> Decimal:
         if price <= 0:

@@ -20,6 +20,7 @@ expensive.
 | 5 | `python -m arcusbot quote` | the exact prices it would post, right now |
 | 6 | `python -m arcusbot run --mode dry-run` | full loop against live data, no orders |
 | 7 | `python -m arcusbot run --mode live --duration 900` | the real thing, time-boxed |
+| 8 | `python -m arcusbot history` | cumulative totals and loss carry-over across runs |
 
 ---
 
@@ -190,6 +191,21 @@ order. Replace the codes with your own if you fork this repo.
 | `RISK_STALE_PRICE_S` | `20` | refuse to quote on stale data |
 | `RISK_CANCEL_ALL_ON_EXIT` | `true` | leave nothing resting |
 | `RISK_DEAD_MANS_SWITCH_S` | `0` | arm the venue-side switch (0 = off) |
+
+### State across restarts
+See [`PERSISTENCE.md`](PERSISTENCE.md). Without this a crash-looping bot resets
+its own kill switch on every restart and can lose its whole daily limit
+repeatedly while each session reports itself healthy.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `BOT_PERSIST_STATE` | `true` | write `state/session.json`; `false` for CI/backtests |
+| `RISK_CARRY_DRAWDOWN` | `true` | measure drawdown from the all-time peak |
+| `RISK_MAX_RESTART_CRASHES` | `0` | `>0` refuses to start after N unclean exits |
+
+```bash
+python -m arcusbot history      # lifetime totals, today's loss, recent runs
+```
 
 ### Session limits
 `BOT_VOLUME_TARGET_USD` (stop at volume), `BOT_MAX_RUNTIME_S` (stop at time),

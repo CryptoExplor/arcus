@@ -38,6 +38,8 @@ class FeeSchedule:
     level: int = 0
     name: str = "assumed-base"
     source: str = "default"
+    volume_30d_usd: Decimal = Decimal(0)
+    next_tier: dict[str, Any] | None = None   # the tier above, if any
 
     @classmethod
     def from_fee_tiers(cls, payload: Any, volume_30d_usd: Decimal | None = None) -> "FeeSchedule":
@@ -45,6 +47,10 @@ class FeeSchedule:
 
         The table is sorted ascending by level; a tier applies once trailing
         30d volume reaches its `volumeThreshold`. Falls back to the base tier.
+
+        Also records the *next* tier so the bot can report how close it is to
+        cheaper fees — at high tiers maker fees go negative (rebates), which
+        changes the economics of quoting rather than merely improving them.
         """
         tiers: list[dict[str, Any]] = []
         if isinstance(payload, dict):
@@ -55,21 +61,60 @@ class FeeSchedule:
         elif isinstance(payload, list):
             tiers = payload
         if not tiers:
-            return cls()
+            return cls(volume_30d_usd=D(volume_30d_usd or 0))
 
-        chosen = tiers[0]
-        if volume_30d_usd is not None:
-            for tier in tiers:
-                threshold = D(tier.get("volumeThreshold", 0))
-                if volume_30d_usd >= threshold:
-                    chosen = tier
+        ordered = sorted(tiers, key=lambda t: D(t.get("volumeThreshold", 0)))
+        volume = D(volume_30d_usd or 0)
+        chosen = ordered[0]
+        upcoming: dict[str, Any] | None = None
+        for tier in ordered:
+            if volume >= D(tier.get("volumeThreshold", 0)):
+                chosen = tier
+            elif upcoming is None:
+                upcoming = tier
+
         return cls(
             maker_ppm=D(chosen.get("makerFeePpm", 200)),
             taker_ppm=D(chosen.get("takerFeePpm", 500)),
             level=int(chosen.get("level", 0)),
             name=str(chosen.get("name", "tier")),
             source="exchange",
+            volume_30d_usd=volume,
+            next_tier=upcoming,
         )
+
+    # --------------------------------------------------------- progression --
+    @property
+    def maker_is_rebate(self) -> bool:
+        """True when resting orders are PAID rather than charged."""
+        return self.maker_ppm < 0
+
+    def next_tier_progress(self) -> dict[str, Any] | None:
+        """How far to the next fee tier, and what it is worth.
+
+        ``savingBpsPerRoundTrip`` is the concrete prize: how much cheaper a
+        maker/maker cycle becomes. That is the number that decides whether
+        pushing for the next tier is worth the volume it costs to get there.
+        """
+        if not self.next_tier:
+            return None
+        threshold = D(self.next_tier.get("volumeThreshold", 0))
+        remaining = max(Decimal(0), threshold - self.volume_30d_usd)
+        next_maker = D(self.next_tier.get("makerFeePpm", self.maker_ppm))
+        next_taker = D(self.next_tier.get("takerFeePpm", self.taker_ppm))
+        saving_bps = ((self.maker_ppm - next_maker) * 2) / Decimal(100)
+        pct = (self.volume_30d_usd / threshold * 100) if threshold > 0 else Decimal(100)
+        return {
+            "level": int(self.next_tier.get("level", self.level + 1)),
+            "name": str(self.next_tier.get("name", "next")),
+            "volumeThresholdUsd": dec_str(threshold),
+            "remainingVolumeUsd": dec_str(remaining),
+            "pctComplete": dec_str(min(Decimal(100), pct).quantize(Decimal("0.01"))),
+            "makerBps": dec_str(next_maker / Decimal(100)),
+            "takerBps": dec_str(next_taker / Decimal(100)),
+            "savingBpsPerRoundTrip": dec_str(saving_bps),
+            "unlocksMakerRebate": next_maker < 0 <= self.maker_ppm,
+        }
 
     @property
     def maker_bps(self) -> Decimal:
@@ -90,6 +135,10 @@ class FeeSchedule:
         maker_legs=2 -> both legs rest (maker/maker)
         maker_legs=1 -> maker open, taker close (the realistic default)
         maker_legs=0 -> taker/taker
+
+        This can go **negative** at rebate tiers, where resting both legs earns
+        more than it costs. Callers must not clamp it to zero: a negative cost
+        is real income and legitimately lowers the spread the quoter needs.
         """
         legs = [self.maker_bps] * maker_legs + [self.taker_bps] * (2 - maker_legs)
         return sum(legs, Decimal(0))
@@ -102,6 +151,9 @@ class FeeSchedule:
             "taker_ppm": str(self.taker_ppm),
             "maker_bps": str(self.maker_bps),
             "taker_bps": str(self.taker_bps),
+            "maker_is_rebate": self.maker_is_rebate,
+            "volume_30d_usd": str(self.volume_30d_usd),
+            "next_tier": self.next_tier_progress(),
             "source": self.source,
         }
 

@@ -52,9 +52,10 @@ class RiskVerdict:
 
 
 class RiskManager:
-    def __init__(self, cfg: Config, pnl: PnLTracker) -> None:
+    def __init__(self, cfg: Config, pnl: PnLTracker, session: Any = None) -> None:
         self.cfg = cfg
         self.pnl = pnl
+        self.session = session
         self.order_times: deque[float] = deque(maxlen=2_000)
         self.consecutive_errors = 0
         self.total_errors = 0
@@ -67,6 +68,38 @@ class RiskManager:
         self.day_start = time.time()
         self.day_start_net = Decimal(0)
         self.last_verdict = RiskVerdict()
+        # Loss already booked today, before this process started. Without it a
+        # restart resets the daily limit and the bot can lose it again.
+        self.carried_daily_loss = Decimal(0)
+        self.carried_drawdown = Decimal(0)
+        if session is not None:
+            self.carried_daily_loss = session.carried_daily_loss()
+            if cfg.carry_drawdown:
+                self.carried_drawdown = max(Decimal(0), session.risk.peak_net_pnl_usd)
+            if cfg.max_restart_crashes and \
+                    session.risk.consecutive_crashes >= cfg.max_restart_crashes:
+                self.halt(
+                    f"{session.risk.consecutive_crashes} consecutive unclean exits "
+                    f">= RISK_MAX_RESTART_CRASHES ({cfg.max_restart_crashes}); "
+                    f"last: {session.risk.last_exit_reason or 'unknown'}. "
+                    "Investigate before restarting, or clear state/session.json."
+                )
+
+    # ------------------------------------------------- cross-restart totals --
+    def effective_daily_loss(self) -> Decimal:
+        """Today's loss including anything booked before this restart."""
+        net = self.pnl.net_pnl()
+        session_loss = -net if net < 0 else Decimal(0)
+        return session_loss + self.carried_daily_loss
+
+    def effective_drawdown(self) -> Decimal:
+        """Drawdown measured from the all-time peak, not this session's peak."""
+        live = self.pnl.drawdown()
+        if not self.carried_drawdown:
+            return live
+        # Peak carried over from previous runs: measure the fall from there too.
+        from_carried = max(Decimal(0), self.carried_drawdown - self.pnl.net_pnl())
+        return max(live, from_carried)
 
     # ---------------------------------------------------------- accounting --
     def note_order(self) -> None:
@@ -187,12 +220,19 @@ class RiskManager:
             return verdict
 
         net = self.pnl.net_pnl()
-        drawdown = self.pnl.drawdown()
+        drawdown = self.effective_drawdown()
+        daily_loss = self.effective_daily_loss()
 
         if drawdown >= self.cfg.max_drawdown_usd:
-            self.halt(f"drawdown ${dec_str(drawdown)} >= ${dec_str(self.cfg.max_drawdown_usd)}")
-        if net <= -self.cfg.max_daily_loss_usd:
-            self.halt(f"net PnL ${dec_str(net)} <= -${dec_str(self.cfg.max_daily_loss_usd)}")
+            carried = (f" (includes ${dec_str(self.carried_drawdown)} carried from "
+                       f"previous runs)" if self.carried_drawdown else "")
+            self.halt(f"drawdown ${dec_str(drawdown)} >= "
+                      f"${dec_str(self.cfg.max_drawdown_usd)}{carried}")
+        if daily_loss >= self.cfg.max_daily_loss_usd:
+            carried = (f" (includes ${dec_str(self.carried_daily_loss)} already lost "
+                       f"today)" if self.carried_daily_loss else "")
+            self.halt(f"daily loss ${dec_str(daily_loss)} >= "
+                      f"${dec_str(self.cfg.max_daily_loss_usd)}{carried}")
         if self.consecutive_errors >= self.cfg.max_consecutive_errors:
             self.halt(f"{self.consecutive_errors} consecutive errors")
         if self.cfg.max_runtime_s and (now - self.started_at) >= self.cfg.max_runtime_s:
@@ -245,4 +285,8 @@ class RiskManager:
             "freeCollateral": dec_str(self.free_collateral) if self.free_collateral is not None else None,
             "equity": dec_str(self.equity) if self.equity is not None else None,
             "throttledFor": round(max(0.0, self.throttle_until - time.time()), 2),
+            "effectiveDrawdown": dec_str(self.effective_drawdown()),
+            "effectiveDailyLoss": dec_str(self.effective_daily_loss()),
+            "carriedDrawdown": dec_str(self.carried_drawdown),
+            "carriedDailyLoss": dec_str(self.carried_daily_loss),
         }
