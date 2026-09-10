@@ -32,6 +32,7 @@ before changing X".
 | restart behaviour | `arcusbot/session.py`, `docs/PERSISTENCE.md` |
 | claiming the strategy works | `arcusbot/evidence.py`, `docs/VALIDATION.md` — read BEFORE reporting any result |
 | running real testnet sessions | `docs/LOCAL_AGENT_HANDOFF.md` — `ARCUS_VENUE=sim` is the default and does NOT hit Arcus |
+| dead code / coverage / known gaps | `docs/CODE_AUDIT.md` |
 | credentials / multiple wallets | `arcusbot/wallets.py`, `docs/BOT_OPERATIONS.md` (credentials) |
 
 Then run `python -m pytest tests -q` (256 tests, no network, <1s). If you cannot
