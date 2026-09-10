@@ -31,6 +31,8 @@ from typing import Any
 
 from .book import BookState, MarketState
 from .capital import Allocation, apply_allocation, needs_resize, plan_capital
+from .adaptive import AdaptiveController
+from .mainnet import apply_mainnet_limits, assert_capital_within_cap, evaluate_gate
 from .config import Config
 from .pnl import FeeSchedule, Fill, PnLTracker, fills_from_ws
 from .referral import all_referral_links, banner, vip_progress
@@ -76,6 +78,8 @@ class Engine:
         self.pending_unknown: dict[str, dict[str, Any]] = {}
         self.needs_reconcile = False
         self.reconciles = 0
+        self.mainnet_cap: Decimal | None = None
+        self.adaptive: dict[str, AdaptiveController] = {}
 
     # ------------------------------------------------------------ bootstrap --
     def _load_markets(self) -> dict[str, dict[str, Any]]:
@@ -112,6 +116,8 @@ class Engine:
             return FeeSchedule()
 
     async def setup(self) -> None:
+        self._apply_mainnet_gate()
+
         if self.cfg.venue == "sim":
             self.sim = SimExchange(self.cfg)
 
@@ -164,6 +170,7 @@ class Engine:
             )
             state.apply_market_row(meta)
             self.states[name] = state
+            self.adaptive[name] = AdaptiveController(market=name)
             self.workers[name] = MarketWorker(cfg=self.cfg, market=name, state=state, pnl=self.pnl)
 
         if self.cfg.venue == "arcus":
@@ -226,6 +233,72 @@ class Engine:
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self.ws.connected.wait(), timeout=15)
 
+    # ---------------------------------------------------- adaptive control --
+    def _update_adaptive(self) -> None:
+        """Feed observations to each controller and apply its verdict.
+
+        Runs before quoting so the strategy sees this loop's conditions, not
+        the previous one's.
+        """
+        for name, worker in self.workers.items():
+            ctl = self.adaptive.get(name)
+            if ctl is None:
+                continue
+            state = self.states[name]
+            mid = state.reference_price
+            if mid:
+                ctl.note_mid(mid)
+            ctl.note_pnl(self.pnl.net_pnl())
+
+            book = state.book
+            depth_ratio: Decimal | None = None
+            clip = self.cfg.order_notional_usd
+            top = book.top_depth_usd()
+            if top and clip > 0:
+                depth_ratio = top / clip
+
+            inventory_usd = abs(worker.position) * mid if (worker.position and mid) else Decimal(0)
+            utilisation = (inventory_usd / self.cfg.max_inventory_notional_usd
+                           if self.cfg.max_inventory_notional_usd > 0 else Decimal(0))
+            age = (time.time() - worker.inventory_since) if worker.inventory_since else 0.0
+
+            adj = ctl.evaluate(
+                vol_bps=state.vol_bps if state.vol_ready else None,
+                spread_bps=book.spread_bps,
+                depth_ratio=depth_ratio,
+                inventory_age_s=age,
+                inventory_utilisation=utilisation,
+            )
+            previous = worker.adjustment
+            worker.adaptive = ctl
+            worker.adjustment = adj
+            # Only log when the verdict actually changes, otherwise this floods.
+            if previous is None or previous.describe() != adj.describe():
+                if adj.reasons:
+                    log.info("[%s] adapting: %s", name, adj.describe())
+
+    # ------------------------------------------------------- mainnet guard --
+    def _apply_mainnet_gate(self) -> None:
+        """Enforce the mainnet opt-in and shrink risk limits to the budget.
+
+        The gate is re-evaluated here rather than trusted from config parsing:
+        this is the last point before orders can be sent, and it is the risk
+        engine — not documentation — that has to hold the line.
+        """
+        gate = evaluate_gate(self.cfg)
+        if not gate.allowed:
+            raise RuntimeError(
+                "refusing to trade live on mainnet:\n  - " + "\n  - ".join(gate.reasons)
+            )
+        if not gate.is_mainnet_live_attempt:
+            return
+
+        self.mainnet_cap = gate.capital_cap
+        log.warning("MAINNET LIVE — real funds. Hard capital cap $%s.",
+                    dec_str(gate.capital_cap or Decimal(0)))
+        for change in apply_mainnet_limits(self.cfg, gate.capital_cap):
+            log.warning("mainnet risk floor: %s", change)
+
     # --------------------------------------------------- capital allocation --
     def _resize_capital(self, initial: bool = False) -> None:
         """Derive sizing from the account balance (capital mode only).
@@ -236,6 +309,15 @@ class Engine:
         """
         equity = self.risk.equity
         alloc = plan_capital(self.cfg, equity, len(self.workers) or len(self.cfg.markets))
+
+        # On mainnet the gate's capital cap is a hard budget, not a target: an
+        # equity-driven re-size must never grow past it. Checked on every
+        # allocation, because equity moves and the cap does not.
+        breach = assert_capital_within_cap(alloc.deployable_usd, self.mainnet_cap)
+        if breach:
+            log.error("MAINNET CAP BREACH: %s", breach)
+            self.risk.halt(f"mainnet capital cap: {breach}")
+            return
 
         if initial:
             self.allocation = alloc
@@ -592,8 +674,13 @@ class Engine:
         return True
 
     def _handle_api_error(self, exc: ArcusError, intent: OrderIntent) -> None:
+        ctl = self.adaptive.get(intent.market)
+        if ctl is not None:
+            ctl.note_api_error()
         if exc.rate_limited:
             wait = max(exc.retry_after_s, 0.5)
+            if ctl is not None:
+                ctl.note_rate_limited(wait)
             self.risk.throttle(wait, f"429 ({exc.limit_reason})")
             log.warning("rate limited (%s) — backing off %.2fs", exc.limit_reason, wait)
             return
@@ -631,6 +718,7 @@ class Engine:
 
         for st in self.states.values():
             st.observe_vol()
+        self._update_adaptive()
         self.pnl.set_marks({name: st.reference_price for name, st in self.states.items()})
         self._resize_capital()
         verdict = self.risk.evaluate()
@@ -700,6 +788,11 @@ class Engine:
                      fill.market, fill.side, dec_str(fill.size), dec_str(fill.price),
                      fill.liquidity, dec_str(fill.fee))
             worker = self.workers.get(fill.market)
+            ctl = self.adaptive.get(fill.market)
+            state = self.states.get(fill.market)
+            if ctl is not None and state is not None and state.reference_price:
+                ctl.note_fill(fill.side, fill.price, state.reference_price,
+                              worker.edge_bps() if worker else Decimal(0))
             if worker and fill.client_id:
                 worker.on_terminal(fill.client_id)
 

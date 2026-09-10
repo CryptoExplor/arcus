@@ -63,6 +63,21 @@ class BookState:
     def best_ask_size(self) -> Decimal:
         return self.asks[0].size if self.asks else Decimal(0)
 
+    def top_depth_usd(self, levels: int = 5) -> Decimal | None:
+        """Notional resting within the top N levels of both sides.
+
+        Used to judge whether our clip is a small part of the book or most of
+        it — quoting a clip comparable to the whole top of book means our own
+        order is the liquidity, and fills are far more likely to be adverse.
+        """
+        if not self.bids and not self.asks:
+            return None
+        total = Decimal(0)
+        for side in (self.bids[:levels], self.asks[:levels]):
+            for level in side:
+                total += level.price * level.size
+        return total or None
+
     @property
     def mid(self) -> Decimal | None:
         if self.best_bid is not None and self.best_ask is not None:

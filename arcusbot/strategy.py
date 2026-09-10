@@ -51,6 +51,7 @@ from typing import Any, Iterable, Literal
 from .book import MarketState
 from .config import Config
 from .pnl import PnLTracker
+from .adaptive import AdaptiveController, Adjustment
 from .scaling import D, clamp_slippage_price, dec_str, snap_price, snap_size
 
 log = logging.getLogger("arcusbot.strategy")
@@ -116,6 +117,8 @@ class MarketWorker:
     last_flatten_at: float = 0.0
     cycles: int = 0
     adopted: int = 0
+    adaptive: "AdaptiveController | None" = None
+    adjustment: "Adjustment | None" = None
     seq: int = 0
     inventory_since: float = 0.0
 
@@ -184,6 +187,11 @@ class MarketWorker:
         base = max(self.cfg.spread_bps, floor)
         if self.state.vol_ready:
             base = max(base, floor + self.state.vol_bps * self.cfg.vol_edge_multiplier)
+        if self.adjustment is not None:
+            # The adaptive layer may widen freely but must never price below
+            # the fee-derived floor: that floor is what makes a fill profitable
+            # at all, and no amount of "conditions look good" changes it.
+            base = max(base * self.adjustment.edge_multiplier, floor)
         return base
 
     def desired_quotes(self) -> list[tuple[str, Decimal, Decimal]]:
@@ -424,7 +432,10 @@ class MarketWorker:
                 )
             return intents
 
-        if time.time() - self.last_quote_at < self.cfg.requote_interval_s:
+        interval = self.cfg.requote_interval_s
+        if self.adjustment is not None:
+            interval *= float(self.adjustment.interval_multiplier)
+        if time.time() - self.last_quote_at < interval:
             return intents
 
         book = self.state.book
