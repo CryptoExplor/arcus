@@ -1,0 +1,6 @@
+# Core runtime (bot + dashboard). Everything else is Python stdlib.
+cryptography>=42.0.0        # Ed25519 API-key signing (Scheme 1 / Scheme 2)
+websockets>=12.0            # market-data + account streams
+
+# Optional — only needed for onboarding / on-chain testnet funding helpers.
+# Install with:  pip install -r requirements-onboard.txt

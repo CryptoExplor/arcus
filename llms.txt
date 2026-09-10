@@ -1,0 +1,354 @@
+# Arcus Testnet Volume Bot — agent guide (llms.txt)
+
+> Machine-readable operating manual for this repository. If you are an AI agent
+> or a developer picking this up cold, read this file top to bottom before
+> changing anything. It describes what the bot does, the venue it trades, the
+> exact wire rules that make orders valid, and the invariants you must not break.
+
+Repository: automated market-making / volume bot for the **Arcus** exchange
+(perpetuals + Stock Token spot), built and tuned for **testnet**.
+Language: Python 3.11+, stdlib-only except `cryptography` and `websockets`.
+Entry point: `python -m arcusbot <command>`.
+
+---
+
+## 1. Objective (read this first)
+
+The goal is **not** directional profit. It is:
+
+> generate as much trading volume as possible on testnet, while net PnL after
+> exchange fees stays greater than or equal to zero — i.e. the captured spread
+> must cover the fees the volume incurs.
+
+Everything in the codebase follows from that single sentence:
+
+| Requirement | How it is enforced | Where |
+| --- | --- | --- |
+| Volume | Continuous two-sided quoting, both sides re-posted after every fill | `strategy.MarketWorker.tick` |
+| Don't lose funds | Position caps, drawdown kill switch, reduce-only closes, collateral floor | `risk.RiskManager` |
+| Cover fees | Every quoted pair must clear `fees(maker+maker) + buffer + volatility` | `strategy.MarketWorker.edge_bps` |
+| Measure it | Per-fill average-cost ledger, fee-aware net PnL, `feeCoverageRatio` | `pnl.PnLTracker` |
+| Be aggressive safely | ALO (post-only) quotes can never pay taker fees; only inventory closes cross | `strategy`, `sim` |
+
+The single most important number the bot reports is **`netBpsOfVolume`**:
+net PnL expressed in basis points of the volume that produced it. Positive means
+the volume paid for itself. `feeCoverageRatio > 1` means the same thing.
+
+---
+
+## 2. Quick start
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# 1. Prove the machinery offline — no network, no keys, deterministic.
+.venv/bin/python -m arcusbot selftest --venue sim
+
+# 2. Find a spread that clears fees (multi-seed, offline).
+.venv/bin/python -m arcusbot sweep --sweep-spreads 6,10,20 --sweep-seeds 4
+
+# 3. Point at the real testnet, read-only.
+.venv/bin/python -m arcusbot preflight
+.venv/bin/python -m arcusbot quote          # what it WOULD place
+.venv/bin/python -m arcusbot run --mode dry-run --port 8080
+
+# 4. Go live on testnet (small, time-boxed).
+.venv/bin/python -m arcusbot run --mode live --duration 900 --notional 25 --port 8080
+```
+
+Credentials come from `.env` (see `.env.example`). Generate them in the web app
+at <https://testnet.arcus.xyz/api-keys>, or scripted via `tools/onboard.py`.
+
+---
+
+## 3. Commands
+
+| Command | Network? | Sends orders? | Purpose |
+| --- | --- | --- | --- |
+| `selftest` | no | to the simulator | End-to-end run + hard assertions on the accounting |
+| `sweep` | no | to the simulator | Measure net bps across spreads/seeds |
+| `preflight` | read-only | no | Gateway, key registration, markets, fees, balance, sizing |
+| `markets` | read-only | no | Tick/step/notional grid per market |
+| `quote` | read-only | no | Print the exact intents the strategy would emit now |
+| `run --mode dry-run` | read-only | no | Full loop, logs intents instead of signing |
+| `run --mode live` | yes | **yes** | Real signed orders |
+| `report` | no | no | Reprint the last session's PnL report |
+
+Useful flags: `--venue sim|arcus`, `--markets BTC-USD,ETH-USD`, `--notional 25`,
+`--spread-bps 10`, `--duration 900`, `--volume-target 5000`, `--port 8080`, `--json`.
+
+---
+
+## 4. The venue: Arcus wire rules that actually matter
+
+Source: <https://docs.arcus.xyz/llms.txt>. These are the rules that cause silent
+failures if you get them wrong.
+
+### 4.1 Endpoints
+- REST testnet `https://api.testnet.arcus.xyz`, WS `wss://api.testnet.arcus.xyz/v1/ws`
+- Mainnet `https://api.arcus.xyz` / `wss://api.arcus.xyz/v1/ws`
+  (the bot **refuses** `--mode live` on mainnet by design — `config.validate`)
+
+### 4.2 Authentication
+API key = the **public half of an Ed25519 keypair**. Three headers on every
+mutating call: `X-API-Key`, `X-Timestamp` (Unix **nanoseconds**, ±30s of server
+clock), `X-Signature` (128 lowercase hex).
+
+**Scheme 1 — typed canonical payload** (`placeOrder` op 1, `cancelOrder` op 2,
+`modifyOrder` op 3, untriggered TPSL op 4). The signed message *is* the compact
+key-sorted JSON payload — no prefix, no concatenation:
+
+```
+{"ad":"0x…","ai":N,"c":"…","ct":N,"g":N,"m":N,"op":1,"p":N,"q":N,"r":0,"s":N,"t":N,"v":1}
+```
+
+- `ad` master address, **lowercased** — the only case-folded field
+- `c` clientId — **omitted entirely when empty**, otherwise signed byte-for-byte
+  in the exact case you send it (`id` likewise)
+- `ct` == the `X-Timestamp` you send, in nanoseconds
+- `g` goodTilTime in **nanoseconds** = body `goodTilTime` (µs) × 1000
+- `p` integer ticks = `price / tickSize`; `q` integer quantums = `size / stepSize`
+  — the division must be **exact**, and the divisor is always the market's
+  top-level `tickSize` even inside a coarser `tickTiers` band
+- `r` reduce-only as integer `0`/`1` — never a JSON boolean
+- `s` side (0 buy / 1 sell), `t` TIF (0 GTT, 1 FOK, 2 IOC, 3 ALO), `v` = 1
+
+**Scheme 2 — legacy** (`cancelAllOrders`, `setLeverage`,
+`scheduleCancelAllDeadMansSwitch`, WS `authenticate`):
+`ed25519(str(timestamp_ns) + action + canonical_json(body))`, no delimiters.
+`action` is the camelCase final path segment.
+
+**Batches** are Scheme 1 applied per element, all sharing one `X-Timestamp` as
+each element's `ct`; every element carries its own `signature`. The envelope
+`X-Signature` header must still be **present** (value unverified) — omit it and
+every element fails with `invalid order signature`.
+
+### 4.3 Order rules that reject you
+- `goodTilTime` is **required on every order including IOC and FOK**, and must
+  be **≥ ~1 month in the future**. It is replay protection, not just expiry.
+- Body `goodTilTime` is epoch **microseconds** (string); the signed `g` is that
+  × 1000.
+- Body `price`/`quantity` stay **decimal strings** and must match the values the
+  integer `p`/`q` were derived from.
+- Minimum order notional **$5** (`quantity × price`); reduce-only is exempt.
+- `MARKET` orders must be `timeInForce: IOC` and still carry a `price` — a
+  protective bound within **10%** of mark, else
+  `MarketPriceSlippageToleranceTooHigh`. Most integrations just send an
+  aggressive LIMIT instead; this bot does.
+- Single-order TPSL via `POST /v1/placeOrder` returns **501** — TPSL must go
+  through `batchPlaceOrders` groupings.
+- **There is no cancel-on-disconnect.** Dropping the socket does not cancel
+  resting orders. Either cancel explicitly on exit (this bot does) or arm the
+  dead man's switch (`RISK_DEAD_MANS_SWITCH_S`).
+
+### 4.4 Async execution
+`placeOrder`/`cancelOrder`/batches return **202 ACK** (sometimes 200 with state).
+The HTTP body is an acknowledgement, **not** the outcome. Definitive lifecycle
+lives on the `orders` and `userFills` WebSocket channels. Treat exchange
+`positions` as inventory truth and reconcile against it — this bot does so every
+loop (`engine._sync_positions`).
+
+### 4.5 Rate limits (two independent layers)
+- **Per IP**: 1,500 weight bucket, refilling 25/s. `markets`/`fills`/`candles`
+  cost 20; `bbo`/`account`/`positions` cost 2; `setLeverage` costs 125;
+  **order writes cost 0**. `rest.IPBudget` mirrors this client-side and sleeps
+  pre-emptively rather than discovering 429s.
+- **Per subaccount**: order pool 20,000 / cancel pool 40,000, growing with
+  lifetime volume (`+1` unit per $0.10 traded). `cancelAllOrders` charges a flat
+  1,000 against the cancel pool. Exhausted → a 1-action-per-10s drip.
+- A 429 body's `reason` field says which layer rejected (`ip`, `account_empty`,
+  `account_partial`); `retryAfterMs` is exact. Prefer WS subscriptions over REST
+  polling — that is the whole reason this bot streams.
+
+### 4.6 Rejection reasons worth handling
+`POST_ONLY_WOULD_CROSS` (free — an ALO that would take; just re-quote),
+`SELF_TRADE`, `UNDERCOLLATERALIZED`, `IOC_CANCELED`, `FOK_FAILED`,
+`REDUCE_ONLY_WOULD_INCREASE`, `DUPLICATE_CLIENT_ID`, `POSITION_SIZE_CAP_EXCEEDED`,
+`OPEN_INTEREST_CAP_EXCEEDED`, `FILL_WILL_EXCEED_TRADING_BOUND`.
+
+### 4.7 Fees
+Maker/taker in **ppm** from `GET /v1/feetiers` (never hard-code; high tiers can
+be negative = maker rebate). Perp fee tiers publish closer to launch. **Spot is
+free at launch.** Funding is a transfer between traders, not a fee.
+
+### 4.8 Spot (Stock Tokens) is not an order book
+Spot is an RFQ + AMM **router**: request a quote, sign an intent with a
+client-side `minBuyAmount` floor, the server settles the single best firm quote
+atomically on-chain. There is nothing to rest, so `SpotVolumeStrategy` emits
+round-trip *intents* gated on quoted slippage rather than posting orders.
+
+### 4.9 Real-world-asset markets
+Equity/commodity perps have `regularTradingHours`. Outside RTH they use a higher
+`offHoursInitialMarginFraction` and enforce hard `upperTradingBound` /
+`lowerTradingBound` price bands. `MarketState.within_bounds` refuses to quote
+outside them; sizing must respect the off-hours margin or you get
+`UNDERCOLLATERALIZED`.
+
+---
+
+## 5. Architecture
+
+```
+cli.py         argument parsing, logging, command dispatch
+config.py      typed config from env/.env + validate()  <- refuses live-on-mainnet
+signing.py     Ed25519, Scheme 1 typed payloads, Scheme 2 legacy
+scaling.py     decimal <-> ticks/quantums, tier-aware snapping, slippage clamp
+rest.py        signed REST client + client-side IP weight budget
+ws.py          reconnecting WebSocket, channel fan-out, signed RPC
+book.py        BookState (L2/BBO) + MarketState (mark, bands, realised vol EWMA)
+pnl.py         FeeSchedule (ppm), Fill, average-cost MarketPnL, PnLTracker
+risk.py        per-order gate + global verdict (OK/THROTTLE/FLATTEN/HALT)
+strategy.py    MarketWorker (perp quoting) + SpotVolumeStrategy (RFQ)
+sim.py         offline paper exchange: adverse + uninformed flow, real fee math
+sweep.py       multi-seed edge measurement
+engine.py      the async loop wiring all of the above
+dashboard.py   stdlib HTTP live dashboard + /api/status JSON
+```
+
+Data flow per loop (`engine._loop_once`):
+
+```
+ws frames -> BookState/MarketState -> observe_vol()
+          -> PnLTracker.set_marks()
+          -> RiskManager.evaluate()  ->  OK | THROTTLE | FLATTEN | HALT
+          -> MarketWorker.tick(can_open)  -> [OrderIntent]
+          -> risk.check_order() per intent
+          -> REST placeOrder / cancelOrder   (0 IP weight)
+          -> userFills/orders/positions stream back -> PnLTracker
+```
+
+---
+
+## 6. Strategy: `volume-maker`
+
+1. Compute the **required edge**:
+   `max(configured_spread, fee_round_trip + buffer, fee_floor + vol_multiplier × realised_vol)`.
+   The volatility term is the adverse-selection premium — a static spread in a
+   moving market is how makers bleed.
+2. Post one ALO bid and one ALO ask around mid, offset by half the edge, skewed
+   against current inventory so the reducing side is more attractive.
+3. Snap to the tick grid, then **re-verify** the pair still clears the edge
+   (coarse ticks can silently erase a 1–2 bps margin).
+4. On a fill: the reducing side becomes **reduce-only**, sized to cover the
+   position, priced at `entry ± required_edge` so the round trip books positive
+   gross edge. Both legs resting = maker/maker = the cheapest possible cycle.
+5. Escalate to a reduce-only **IOC** (paying taker fees, crossing the spread)
+   only when inventory is oversized, older than `BOT_INVENTORY_MAX_AGE_S`, or on
+   shutdown. Carrying unhedged inventory is the bigger, unbounded risk — fees
+   are bounded and known.
+
+`ping-pong` = same skeleton, always taker-closes (more volume, worse edge).
+`spot-rfq` = zero-fee spot round trips gated on quoted slippage.
+
+---
+
+## 7. Risk model
+
+Per order (`risk.check_order`): market ONLINE, min notional, max order size,
+inside off-hours bands, price not stale, open-order cap, order-rate cap,
+projected position under notional cap, free collateral above floor.
+**Reduce-only orders bypass the opening restrictions and are still permitted
+after a halt** — the bot must always be able to close what it opened.
+
+Global verdict (`risk.evaluate`):
+
+| State | Meaning |
+| --- | --- |
+| `OK` | quote normally |
+| `THROTTLE` | cool-down after a 429 / rejection storm |
+| `FLATTEN` | stop opening, keep closing (collateral floor, inventory cap, 70% of drawdown limit) |
+| `HALT` | kill switch: cancel all, flatten, write report, exit |
+
+Kill switch fires on: max drawdown, max daily loss, N consecutive errors,
+runtime limit, volume target reached, auth failure (401/403).
+
+Shutdown is always `cancel-all -> flatten (reduce-only IOC, retried) -> report`.
+
+---
+
+## 8. Invariants — do not break these
+
+1. **Never quote a pair tighter than the fee-derived edge.** Test:
+   `test_quoted_spread_always_clears_the_fee_floor`.
+2. **Never round a price/size into existence.** `to_ticks`/`to_quantums` raise on
+   a non-exact division; sizes always round **down**.
+3. **The signed payload and the request body must agree.** Both are built from
+   the same snapped decimals in `rest.build_order`.
+4. **Reduce-only orders are always allowed**, including post-halt.
+5. **Exchange positions are truth**; the local book is reconciled, not trusted.
+6. **Fills are idempotent by `tradeId`** — snapshot and stream overlap.
+7. **`net = realized + unrealized + funding + rebates − fees`** — asserted in
+   `selftest` and `test_net_pnl_identity_includes_fees_and_rebates`.
+8. **Live mode on mainnet is refused** in `config.validate()`.
+
+Run `python -m pytest tests -q` (68 tests, no network) after any change.
+
+---
+
+## 9. Configuration
+
+Full list in `.env.example`. The ones that change behaviour most:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `BOT_MODE` | `dry-run` | `live` actually signs and sends |
+| `ARCUS_VENUE` | `arcus` | `sim` = offline paper exchange |
+| `BOT_MARKETS` | `BTC-USD,ETH-USD` | markets to quote |
+| `BOT_ORDER_NOTIONAL_USD` | `25` | per-clip size (min $5 engine floor) |
+| `BOT_SPREAD_BPS` | `10` | target round-trip edge |
+| `BOT_FEE_BUFFER_BPS` | `1` | margin required over fees |
+| `BOT_VOL_EDGE_MULTIPLIER` | `1.5` | spread widening per bps of realised vol |
+| `BOT_INVENTORY_SKEW_BPS` | `8` | max quote shift at full inventory |
+| `BOT_MAX_POSITION_NOTIONAL_USD` | `150` | hard per-market position cap |
+| `BOT_INVENTORY_MAX_AGE_S` | `90` | when to cross the spread to flatten |
+| `RISK_MAX_DRAWDOWN_USD` | `25` | kill switch |
+| `RISK_MIN_FREE_COLLATERAL_USD` | `50` | flatten-only floor |
+| `BOT_VOLUME_TARGET_USD` | `0` | stop after this much volume (0 = unlimited) |
+| `BOT_METRICS_PORT` | `0` | dashboard port (0 = off) |
+
+---
+
+## 10. Monitoring
+
+`--port 8080` serves a live dashboard plus:
+- `GET /api/status` — full engine status (the same JSON written to `state/status.json`)
+- `GET /api/report` — PnL block only
+- `GET /healthz`
+
+Artifacts: `state/status.json` (live), `state/fills.jsonl` (append-only journal),
+`state/report-<session>.json` + `report-latest.json`, `logs/bot-YYYYMMDD.log`.
+
+Health checklist while running: `netBpsOfVolume` ≥ 0, `feeCoverageRatio` ≥ 1,
+`makerShare` high (taker legs are the expensive ones), `risk.state` = OK,
+`ws.connected` true, `rejects` not climbing (a few `POST_ONLY_WOULD_CROSS` is
+normal and free), `ipBudget.tokens` not pinned at 0.
+
+---
+
+## 11. Known limits / honest caveats
+
+- The simulator is a **machinery test, not a market model**. It proves the bot
+  quotes, fills, closes, accounts and halts correctly. Whether a given spread is
+  profitable is a property of the *real* venue's flow — measure it on testnet.
+- Under mostly-adverse flow (`SIM_UNINFORMED_RATE` at its 0.25 default) the
+  strategy loses ~1.5-2.6 bps; with balanced two-sided flow (0.35+) it clears
+  fees, ~+0.5 to +1.0 bps at a 10 bps spread. That is the correct and expected
+  behaviour of a market maker, not a bug to tune away.
+- Testnet contract addresses in `config.py` **change on every redeploy**. Verify
+  before using `tools/fund_testnet.py`.
+- Perp fee tiers are not final; the bot reads them live and falls back to a
+  conservative 2/5 bps if the endpoint is unavailable.
+- Spot RFQ execution emits intents; wiring the settlement transaction requires
+  the RFQ endpoints and a wallet signer, which are deliberately not automated.
+
+---
+
+## 12. Reference
+
+- Docs index: <https://docs.arcus.xyz/llms.txt> · MCP: `https://docs.arcus.xyz/mcp`
+- Auth: <https://docs.arcus.xyz/api-reference/authentication>
+- Rate limits: <https://docs.arcus.xyz/api-reference/rate-limits>
+- Channels: <https://docs.arcus.xyz/api-reference/channels>
+- Fund testnet: <https://docs.arcus.xyz/guides/fund-testnet-account>
+- In-repo: `README.md` (setup), `docs/BOT_OPERATIONS.md` (runbook),
+  `docs/ARCUS_PLATFORM.md` (venue reference), `docs/STRATEGY.md` (the economics).

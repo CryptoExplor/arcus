@@ -1,0 +1,5 @@
+# Only required for tools/onboard.py (createApiKey) and tools/fund_testnet.py
+# (mint -> approve -> initiateDeposit on Robinhood Chain testnet).
+-r requirements.txt
+eth-account>=0.11.0
+web3>=6.15.0
